@@ -10,6 +10,7 @@ on:
       - "rentcars.config.example.json"
       - "package.json"
       - "package-lock.json"
+      - "README.md"
   # GitHub cron uses UTC. These two entries plus the Warsaw-hour gate below
   # keep the real run at 06:00 Europe/Warsaw during both summer and winter time.
   schedule:
