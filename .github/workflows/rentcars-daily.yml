@@ -37,6 +37,8 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 env:
   SCHEDULE_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
@@ -53,6 +55,9 @@ jobs:
     name: Run RentCars.pl scraper
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    environment:
+      name: github-pages
+      url: ${{ steps.pages-deployment.outputs.page_url }}
 
     steps:
       - name: Check Warsaw schedule gate
@@ -163,6 +168,105 @@ jobs:
             echo "::warning::RentCars JSON output is missing; report generation skipped."
           fi
 
+      - name: Ensure GitHub Pages is enabled
+        id: pages-status
+        if: steps.gate.outputs.should_run == 'true'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          pages_api_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/pages"
+
+          get_status=$(
+            curl --silent --show-error \
+              --output /tmp/pages.json \
+              --write-out "%{http_code}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$pages_api_url"
+          )
+
+          if [[ "$get_status" == "200" ]]; then
+            page_url=$(node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync('/tmp/pages.json', 'utf8')); process.stdout.write(data.html_url || '');")
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "page_url=$page_url" >> "$GITHUB_OUTPUT"
+            echo "GitHub Pages is enabled: $page_url"
+            exit 0
+          fi
+
+          if [[ "$get_status" != "404" ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "page_url=" >> "$GITHUB_OUTPUT"
+            echo "::warning::GitHub Pages status check returned HTTP $get_status; Pages deploy skipped."
+            exit 0
+          fi
+
+          create_status=$(
+            curl --silent --show-error \
+              --request POST \
+              --output /tmp/pages-create.json \
+              --write-out "%{http_code}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --data '{"build_type":"workflow"}' \
+              "$pages_api_url"
+          )
+
+          if [[ "$create_status" == "201" || "$create_status" == "409" || "$create_status" == "422" ]]; then
+            retry_status=$(
+              curl --silent --show-error \
+                --output /tmp/pages.json \
+                --write-out "%{http_code}" \
+                --header "Accept: application/vnd.github+json" \
+                --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                "$pages_api_url"
+            )
+
+            if [[ "$retry_status" == "200" ]]; then
+              page_url=$(node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync('/tmp/pages.json', 'utf8')); process.stdout.write(data.html_url || '');")
+              echo "enabled=true" >> "$GITHUB_OUTPUT"
+              echo "page_url=$page_url" >> "$GITHUB_OUTPUT"
+              echo "GitHub Pages is enabled: $page_url"
+              exit 0
+            fi
+          fi
+
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "page_url=" >> "$GITHUB_OUTPUT"
+          echo "::warning::GitHub Pages is not enabled and could not be enabled automatically; Pages deploy skipped."
+
+      - name: Prepare GitHub Pages site
+        if: steps.gate.outputs.should_run == 'true' && steps.pages-status.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          mkdir -p pages
+          cp output/rentcars-report.html pages/index.html
+          cp output/rentcars-report.html pages/report.html
+          cp output/rentcars-results-latest.json pages/rentcars-results-latest.json
+          cp output/rentcars-run-log.txt pages/rentcars-run-log.txt
+          cp output/rentcars-run-error.txt pages/rentcars-run-error.txt
+
+      - name: Configure GitHub Pages
+        if: steps.gate.outputs.should_run == 'true' && steps.pages-status.outputs.enabled == 'true'
+        uses: actions/configure-pages@v5
+        continue-on-error: true
+
+      - name: Upload GitHub Pages artifact
+        if: steps.gate.outputs.should_run == 'true' && steps.pages-status.outputs.enabled == 'true'
+        uses: actions/upload-pages-artifact@v3
+        continue-on-error: true
+        with:
+          path: pages
+
+      - name: Deploy GitHub Pages
+        id: pages-deployment
+        if: steps.gate.outputs.should_run == 'true' && steps.pages-status.outputs.enabled == 'true'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
       - name: Upload RentCars.pl results
         id: upload
         if: steps.gate.outputs.should_run == 'true' && always()
@@ -184,6 +288,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PAGE_URL: ${{ steps.pages-deployment.outputs.page_url || steps.pages-status.outputs.page_url }}
           ARTIFACT_URL: ${{ steps.upload.outputs['artifact-url'] }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -192,7 +297,12 @@ jobs:
             exit 0
           fi
 
-          message=$(printf 'RentCars.pl: wyniki sa gotowe.\n\nArtifact:\n%s\n\nGitHub Actions run:\n%s\n' "$ARTIFACT_URL" "$RUN_URL")
+          if [[ -n "$PAGE_URL" ]]; then
+            report_url="${PAGE_URL%/}/report.html"
+            message=$(printf 'RentCars.pl: wyniki sa gotowe.\n\nRaport HTML:\n%s\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$report_url" "$ARTIFACT_URL" "$RUN_URL")
+          else
+            message=$(printf 'RentCars.pl: wyniki sa gotowe.\n\nArtifact:\n%s\n\nGitHub Actions run:\n%s\n' "$ARTIFACT_URL" "$RUN_URL")
+          fi
 
           if ! curl --fail --show-error --silent \
             --request POST \
