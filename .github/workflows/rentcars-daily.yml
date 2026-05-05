@@ -1,0 +1,203 @@
+name: RentCars daily run
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rentcars-daily.yml"
+      - "src/rentcars/**"
+      - "rentcars.config.example.json"
+      - "package.json"
+      - "package-lock.json"
+  # GitHub cron uses UTC. These two entries plus the Warsaw-hour gate below
+  # keep the real run at 06:00 Europe/Warsaw during both summer and winter time.
+  schedule:
+    - cron: "0 4 * * *"
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      locations:
+        description: "Comma-separated RentCars.pl locations"
+        required: true
+        default: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+      rolling_days:
+        description: "How many pickup start dates from tomorrow"
+        required: true
+        default: "1"
+      durations:
+        description: "Comma-separated rental durations"
+        required: true
+        default: "2"
+      speed_mode:
+        description: "Scraper speed mode: safe, fast, or turbo"
+        required: true
+        default: "fast"
+
+permissions:
+  contents: read
+
+env:
+  SCHEDULE_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+  SCHEDULE_ROLLING_DAYS: "1"
+  SCHEDULE_DURATIONS: "2"
+  SCHEDULE_SPEED_MODE: "fast"
+  PUSH_TEST_LOCATIONS: "Warszawa"
+  PUSH_TEST_ROLLING_DAYS: "1"
+  PUSH_TEST_DURATIONS: "2"
+  PUSH_TEST_SPEED_MODE: "fast"
+
+jobs:
+  rentcars:
+    name: Run RentCars.pl scraper
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check Warsaw schedule gate
+        id: gate
+        shell: bash
+        run: |
+          warsaw_hour="$(TZ=Europe/Warsaw date +%H)"
+          warsaw_now="$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')"
+
+          echo "warsaw_now=$warsaw_now" >> "$GITHUB_OUTPUT"
+          echo "Warsaw time now: $warsaw_now"
+
+          if [[ "${{ github.event_name }}" != "schedule" ]]; then
+            echo "Non-scheduled run requested, bypassing schedule gate."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$warsaw_hour" == "06" ]]; then
+            echo "It is 06:00 in Warsaw, running scraper."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "It is not 06:00 in Warsaw, skipping this UTC trigger."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install Node dependencies
+        if: steps.gate.outputs.should_run == 'true'
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        if: steps.gate.outputs.should_run == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Resolve run options
+        if: steps.gate.outputs.should_run == 'true'
+        id: options
+        shell: bash
+        env:
+          INPUT_LOCATIONS: ${{ inputs.locations }}
+          INPUT_ROLLING_DAYS: ${{ inputs.rolling_days }}
+          INPUT_DURATIONS: ${{ inputs.durations }}
+          INPUT_SPEED_MODE: ${{ inputs.speed_mode }}
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            default_locations="$PUSH_TEST_LOCATIONS"
+            default_rolling_days="$PUSH_TEST_ROLLING_DAYS"
+            default_durations="$PUSH_TEST_DURATIONS"
+            default_speed_mode="$PUSH_TEST_SPEED_MODE"
+          else
+            default_locations="$SCHEDULE_LOCATIONS"
+            default_rolling_days="$SCHEDULE_ROLLING_DAYS"
+            default_durations="$SCHEDULE_DURATIONS"
+            default_speed_mode="$SCHEDULE_SPEED_MODE"
+          fi
+
+          locations="${INPUT_LOCATIONS:-$default_locations}"
+          rolling_days="${INPUT_ROLLING_DAYS:-$default_rolling_days}"
+          durations="${INPUT_DURATIONS:-$default_durations}"
+          speed_mode="${INPUT_SPEED_MODE:-$default_speed_mode}"
+
+          echo "locations=$locations" >> "$GITHUB_OUTPUT"
+          echo "rolling_days=$rolling_days" >> "$GITHUB_OUTPUT"
+          echo "durations=$durations" >> "$GITHUB_OUTPUT"
+          echo "speed_mode=$speed_mode" >> "$GITHUB_OUTPUT"
+
+          echo "Locations: $locations"
+          echo "Rolling days: $rolling_days"
+          echo "Durations: $durations"
+          echo "Speed mode: $speed_mode"
+
+      - name: Run RentCars.pl scraper
+        if: steps.gate.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          mkdir -p output
+          set -o pipefail
+
+          node src/rentcars/run.js \
+            --config rentcars.config.example.json \
+            --locations="${{ steps.options.outputs.locations }}" \
+            --rolling-days="${{ steps.options.outputs.rolling_days }}" \
+            --durations-days="${{ steps.options.outputs.durations }}" \
+            --speed-mode="${{ steps.options.outputs.speed_mode }}" \
+            --timeout-ms=30000 \
+            --output-json output/rentcars-results-latest.json \
+            2> >(tee output/rentcars-run-error.txt >&2) \
+            | tee output/rentcars-run-log.txt
+
+      - name: Generate RentCars.pl HTML report
+        if: steps.gate.outputs.should_run == 'true' && always()
+        shell: bash
+        run: |
+          if [[ -f output/rentcars-results-latest.json ]]; then
+            node src/rentcars/reportHtml.js output/rentcars-results-latest.json output/rentcars-report.html
+          else
+            echo "::warning::RentCars JSON output is missing; report generation skipped."
+          fi
+
+      - name: Upload RentCars.pl results
+        id: upload
+        if: steps.gate.outputs.should_run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rentcars-results-${{ github.run_number }}
+          path: |
+            output/rentcars-results-latest.json
+            output/rentcars-report.html
+            output/rentcars-run-log.txt
+            output/rentcars-run-error.txt
+            artifacts/rentcars/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Notify Telegram
+        if: steps.gate.outputs.should_run == 'true' && steps.upload.outputs['artifact-url'] != ''
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ARTIFACT_URL: ${{ steps.upload.outputs['artifact-url'] }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            echo "::warning::Telegram secrets are missing; notification skipped."
+            exit 0
+          fi
+
+          message=$(printf 'RentCars.pl: wyniki sa gotowe.\n\nArtifact:\n%s\n\nGitHub Actions run:\n%s\n' "$ARTIFACT_URL" "$RUN_URL")
+
+          if ! curl --fail --show-error --silent \
+            --request POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${message}" \
+            --data-urlencode "disable_web_page_preview=true"; then
+            echo "::warning::Telegram notification failed; scraper results were still uploaded."
+          fi

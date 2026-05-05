@@ -1,0 +1,25 @@
+{
+  "locations": [
+    "Warszawa",
+    "Krakow",
+    "Gdansk",
+    "Katowice",
+    "Wroclaw",
+    "Poznan"
+  ],
+  "pickupDate": "2026-05-15",
+  "pickupTime": "10:00",
+  "dropoffDate": "2026-05-17",
+  "dropoffTime": "10:00",
+  "rollingDays": 1,
+  "durationsDays": [2],
+  "sortOrders": ["suggested", "price", "price_insurance"],
+  "residenceCountry": "Poland",
+  "driverAge": 30,
+  "headless": true,
+  "timeoutMs": 30000,
+  "locationConcurrency": 2,
+  "browserExecutablePath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "outputCsv": "output/rentcars-results.csv",
+  "artifactsDir": "artifacts/rentcars"
+}

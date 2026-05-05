@@ -1,0 +1,15 @@
+{
+  "name": "rentcars-tool",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "rentcars": "node src/rentcars/cli.js --config rentcars.config.example.json",
+    "rentcars:json": "node src/rentcars/run.js --config rentcars.config.example.json --save=output/rentcars-results-latest.json",
+    "rentcars:report": "node src/rentcars/reportHtml.js output/rentcars-results-latest.json output/rentcars-report.html",
+    "test": "node tests/run-rentcars-tests.js"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}

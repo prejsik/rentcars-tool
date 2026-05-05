@@ -1,0 +1,10 @@
+node_modules/
+output/
+outputs/
+artifacts/
+release/
+backups/
+.npm-cache/
+.env
+*.log
+*.tmp
