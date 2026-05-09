@@ -25,11 +25,11 @@ on:
       rolling_days:
         description: "How many pickup start dates from tomorrow"
         required: true
-        default: "1"
+        default: "30"
       durations:
         description: "Comma-separated rental durations"
         required: true
-        default: "2"
+        default: "2,3,4,5,6,7,8,9,10"
       speed_mode:
         description: "Scraper speed mode: safe, fast, or turbo"
         required: true
@@ -42,8 +42,8 @@ permissions:
 
 env:
   SCHEDULE_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
-  SCHEDULE_ROLLING_DAYS: "1"
-  SCHEDULE_DURATIONS: "2"
+  SCHEDULE_ROLLING_DAYS: "30"
+  SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10"
   SCHEDULE_SPEED_MODE: "fast"
   PUSH_TEST_LOCATIONS: "Warszawa"
   PUSH_TEST_ROLLING_DAYS: "1"
