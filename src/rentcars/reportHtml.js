@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const MM_CLOSE_PRICE_PER_DAY_THRESHOLD_PLN = 10;
+const MM_TOP1_RUNNER_UP_PRICE_PER_DAY_THRESHOLD_PLN = 5;
 
 function normalizeProviderName(value) {
   return String(value || "")
@@ -83,9 +84,36 @@ function isMmCloseToHigherRankedProvider(mmOffer, rankedOffers) {
   return false;
 }
 
+function isMmTopRankedWithPricierRunnerUp(mmOffer, rankedOffers) {
+  if (!mmOffer || !Number.isFinite(Number(mmOffer.total_price)) || !isPlnOffer(mmOffer)) {
+    return false;
+  }
+
+  const topOffers = Array.isArray(rankedOffers) ? rankedOffers.filter(Boolean) : [];
+  if (!topOffers.length || !isMmCarsProvider(topOffers[0]?.provider_name) || topOffers[0] !== mmOffer) {
+    return false;
+  }
+
+  const runnerUp = topOffers.find((offer, index) => index > 0 && offer && !isMmCarsProvider(offer.provider_name));
+  if (!runnerUp || !Number.isFinite(Number(runnerUp.total_price)) || !isSameCurrency(mmOffer, runnerUp)) {
+    return false;
+  }
+
+  const priceDifference = Number(runnerUp.total_price) - Number(mmOffer.total_price);
+  if (priceDifference <= 0) {
+    return false;
+  }
+
+  const rentalDays = getRentalDaysForComparison(mmOffer, runnerUp);
+  return priceDifference / rentalDays > MM_TOP1_RUNNER_UP_PRICE_PER_DAY_THRESHOLD_PLN;
+}
+
 function mmClassName(offer, rankedOffers) {
   if (!isMmCarsProvider(offer?.provider_name)) {
     return "";
+  }
+  if (isMmTopRankedWithPricierRunnerUp(offer, rankedOffers)) {
+    return "mm mm-top1-gap";
   }
   return isMmCloseToHigherRankedProvider(offer, rankedOffers) ? "mm mm-close" : "mm";
 }
@@ -264,6 +292,8 @@ function buildHtmlReport(payload) {
       --yellow-text: #253040;
       --blue-bg: #1e5bd7;
       --blue-text: #ffffff;
+      --red-bg: #d73535;
+      --red-text: #ffffff;
     }
 
     * { box-sizing: border-box; }
@@ -347,6 +377,11 @@ function buildHtmlReport(payload) {
       color: var(--blue-text);
     }
 
+    .mm-top1-gap {
+      background: var(--red-bg);
+      color: var(--red-text);
+    }
+
     .legend {
       display: flex;
       flex-wrap: wrap;
@@ -389,6 +424,7 @@ function buildHtmlReport(payload) {
   <div class="legend">
     <span><span class="badge mm">MM Cars Rental</span> MM Cars Rental in table</span>
     <span><span class="badge mm mm-close">MM close</span> MM Cars Rental max 10 PLN/day more expensive than a higher-ranked competitor</span>
+    <span><span class="badge mm mm-top1-gap">MM top1</span> MM Cars Rental top1 and top2 more than 5 PLN/day more expensive</span>
   </div>
   ${scenarios.map((scenario, index) => buildScenarioTable(payload, scenario, index, scenarios.length)).join("\n")}
   <div class="footer">Execution started at: ${escapeHtml(executionStartedAt || "Not available")} | Execution duration: ${escapeHtml(executionDuration)}</div>

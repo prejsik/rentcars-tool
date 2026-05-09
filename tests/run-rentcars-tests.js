@@ -182,6 +182,85 @@ runTest("buildHtmlReport renders RentCars title and top offer columns", () => {
   assert.doesNotMatch(html, /Toyota Aygo/);
 });
 
+runTest("buildHtmlReport marks MM Cars Rental red when top1 beats top2 by more than 5 PLN per day", () => {
+  const html = buildHtmlReport({
+    generated_at: "2026-05-04T16:00:00.000Z",
+    locations: ["Warszawa"],
+    scenarios: [
+      {
+        scenario_id: "2026-05-15-2",
+        start_day_label: "2026-05-15",
+        pickup_date: "2026-05-15T10:00:00",
+        dropoff_date: "2026-05-17T10:00:00",
+        rental_days: 2,
+        sort_orders: [{ order: "price", label: "po cenie" }],
+        top_3_by_location: {
+          "Warszawa, Lotnisko-Okecie": {
+            price: [
+              {
+                provider_name: "MM Cars Rental",
+                provider_rating: 4.5,
+                total_price: 198,
+                currency: "PLN",
+                rental_days: 2
+              },
+              {
+                provider_name: "TOPCARS",
+                provider_rating: 4.3,
+                total_price: 210.01,
+                currency: "PLN",
+                rental_days: 2
+              }
+            ]
+          }
+        }
+      }
+    ]
+  });
+
+  assert.match(html, /class="mm mm-top1-gap">MM Cars Rental \(4\.5\)/);
+  assert.match(html, /class="mm mm-top1-gap">198\.00 PLN/);
+});
+
+runTest("buildHtmlReport does not mark MM Cars Rental red at exactly 5 PLN per day ahead", () => {
+  const html = buildHtmlReport({
+    generated_at: "2026-05-04T16:00:00.000Z",
+    locations: ["Warszawa"],
+    scenarios: [
+      {
+        scenario_id: "2026-05-15-2",
+        start_day_label: "2026-05-15",
+        pickup_date: "2026-05-15T10:00:00",
+        dropoff_date: "2026-05-17T10:00:00",
+        rental_days: 2,
+        sort_orders: [{ order: "price", label: "po cenie" }],
+        top_3_by_location: {
+          "Warszawa, Lotnisko-Okecie": {
+            price: [
+              {
+                provider_name: "MM Cars Rental",
+                provider_rating: 4.5,
+                total_price: 198,
+                currency: "PLN",
+                rental_days: 2
+              },
+              {
+                provider_name: "TOPCARS",
+                provider_rating: 4.3,
+                total_price: 208,
+                currency: "PLN",
+                rental_days: 2
+              }
+            ]
+          }
+        }
+      }
+    ]
+  });
+
+  assert.doesNotMatch(html, /<td class="mm mm-top1-gap"/);
+});
+
 if (!process.exitCode) {
   console.log("All RentCars tests passed.");
 }
