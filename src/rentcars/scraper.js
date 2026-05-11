@@ -1847,7 +1847,7 @@ function rentCarsSortOption(value) {
 function normalizeSortOrders(values) {
   const rawValues = Array.isArray(values) && values.length
     ? values
-    : ["suggested", "price", "price_insurance"];
+    : ["price_insurance"];
   const normalized = [];
   for (const value of rawValues) {
     const key = normalizeWhitespace(value).toLowerCase();
@@ -1861,7 +1861,7 @@ function normalizeSortOrders(values) {
 
 function makeLocationTarget(input, option = null) {
   if (input && typeof input === "object" && !Array.isArray(input)) {
-    const sortOption = rentCarsSortOption(input.sortOrder || "suggested");
+    const sortOption = rentCarsSortOption(input.sortOrder || "price_insurance");
     const requestedLocation = normalizeWhitespace(input.requestedLocation || input.location || input.label);
     const location = normalizeWhitespace(input.location || input.label || requestedLocation);
     return {
@@ -1882,9 +1882,9 @@ function makeLocationTarget(input, option = null) {
     location,
     label: location,
     value: normalizeWhitespace(option?.value),
-    sortOrder: "suggested",
-    sortLabel: "sugerowane",
-    priceMode: "base"
+    sortOrder: "price_insurance",
+    sortLabel: "po cenie z ubezpieczeniem",
+    priceMode: "insurance"
   };
 }
 

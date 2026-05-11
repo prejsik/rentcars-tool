@@ -162,6 +162,7 @@ jobs:
             --locations="${{ steps.options.outputs.locations }}" \
             --rolling-days="${{ steps.options.outputs.rolling_days }}" \
             --durations-days="${{ steps.options.outputs.durations }}" \
+            --sort-orders=price_insurance \
             --speed-mode="${{ steps.options.outputs.speed_mode }}" \
             --timeout-ms=30000 \
             --output-json output/rentcars-results-latest.json \

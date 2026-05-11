@@ -177,7 +177,7 @@ function buildScenarioPayload({ config, scenarioConfig, durationDays, results, f
 
   const sortOrders = Array.isArray(config.sortOrders) && config.sortOrders.length
     ? config.sortOrders
-    : ["suggested", "price", "price_insurance"];
+    : ["price_insurance"];
   const top3ByLocation = groupTopOffersByLocation(mappedResults, sortOrders);
   const cheapestByLocation = {};
   const top3PlusMmByLocation = {};

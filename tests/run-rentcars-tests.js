@@ -39,7 +39,7 @@ runTest("loadConfig uses RentCars defaults and output folders", () => {
 
   assert.equal(config.baseUrl, "https://rentcars.pl");
   assert.deepEqual(config.locations, ["Warszawa"]);
-  assert.deepEqual(config.sortOrders, ["suggested", "price", "price_insurance"]);
+  assert.deepEqual(config.sortOrders, ["price_insurance"]);
   assert.match(config.outputCsv, /rentcars-results-/);
   assert.match(config.artifactsDir, /artifacts[\\/]rentcars$/);
 });

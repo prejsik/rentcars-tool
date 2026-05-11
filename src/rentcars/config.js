@@ -428,7 +428,7 @@ function loadConfig(argv) {
   ];
   const sortOrders = configuredSortOrders.length
     ? [...new Set(configuredSortOrders)]
-    : ["suggested", "price", "price_insurance"];
+    : ["price_insurance"];
 
   const defaultCsvName = `rentcars-results-${makeTimestampForFile()}.csv`;
 
