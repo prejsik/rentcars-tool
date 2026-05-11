@@ -7,7 +7,7 @@ This is a separate RentCars.pl scraper module based on the DiscoverCars scraper 
 - opens RentCars.pl and fills the rental search form with Playwright
 - accepts multiple cities in one run and expands each city to all matching RentCars.pl pickup points
 - supports rolling pickup start dates, specific start dates, pickup weekdays, and duration scenarios
-- checks RentCars.pl sort modes: `suggested`, `price`, and `price_insurance`
+- checks RentCars.pl only with the `price_insurance` sort mode
 - extracts offers from JSON responses, embedded page data, or rendered DOM
 - continues processing when one location fails
 - prints sorted prices with provider name and rating, without car model names
@@ -37,12 +37,12 @@ Save the GitHub-style JSON payload:
 node .\src\rentcars\run.js --config .\rentcars.config.example.json --save=.\output\rentcars-results-latest.json
 ```
 
-Fast local smoke test profile in the example config:
+Default local profile in the example config:
 
-- `rollingDays: 1`
+- `rollingDays: 30`
 - `durationsDays: [2]`
-- `sortOrders: ["suggested", "price", "price_insurance"]`
-- starts from tomorrow and checks only one rental length
+- `sortOrders: ["price_insurance"]`
+- starts from tomorrow and checks 30 rolling pickup start dates
 
 Generate the RentCars.pl HTML report from that JSON:
 
@@ -66,14 +66,16 @@ It uploads a separate artifact named `rentcars-results-<run number>` with:
 - `output/rentcars-run-error.txt`
 - `artifacts/rentcars/**`
 
-The default GitHub profile is intentionally quick:
+The scheduled GitHub profile is:
 
 - all DiscoverCars cities mapped to RentCars.pl: `Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan`
-- `rolling_days: 1`
-- `durations: 2`
+- `rolling_days: 30`
+- `durations: 2,3,4,5,6,7,8,9,10`
+- `sort_orders: price_insurance`
 - `speed_mode: fast`
 
 Manual GitHub runs can override locations, rolling days, durations, and speed mode from the `workflow_dispatch` form.
+Telegram notifications use the repository `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets.
 
 Using CLI arguments:
 
@@ -88,7 +90,7 @@ node .\src\rentcars\cli.js `
   --start-dates "2026-05-15" `
   --rolling-days 1 `
   --durations-days 2 `
-  --sort-orders "suggested,price,price_insurance" `
+  --sort-orders "price_insurance" `
   --output-csv .\output\rentcars-results.csv
 ```
 
