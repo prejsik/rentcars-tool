@@ -151,7 +151,7 @@ class RentCarsScraper {
   }
 
   async resolveLocationSearchTargets(browser, requestedLocations) {
-    const fallbackTargets = requestedLocations.map((location) => makeLocationTarget(location));
+    const fallbackTargets = makeAirportOnlyFallbackTargets(requestedLocations);
     if (!/rentcars\.pl/i.test(this.config.baseUrl)) {
       return fallbackTargets;
     }
@@ -187,7 +187,8 @@ class RentCarsScraper {
       for (const requestedLocation of requestedLocations) {
         const matches = findRentCarsLocationMatches(requestedLocation, options);
         if (!matches.length) {
-          targets.push(makeLocationTarget(requestedLocation));
+          const airportFallbacks = makeAirportOnlyFallbackTargets([requestedLocation]);
+          targets.push(...airportFallbacks);
           continue;
         }
 
@@ -1922,9 +1923,57 @@ function findRentCarsLocationMatches(requestedLocation, options) {
     return label.startsWith(`${requested},`);
   });
 
-  return matches.length
-    ? uniqueLocationOptions(matches)
-    : uniqueLocationOptions(options.filter((option) => normalizeForMatch(option.label).includes(requested)));
+  if (requestedHasBranch) {
+    return uniqueLocationOptions(matches);
+  }
+
+  const airportMatches = matches.filter(isRentCarsAirportOption);
+  if (airportMatches.length) {
+    return uniqueLocationOptions(airportMatches);
+  }
+
+  return uniqueLocationOptions(options
+    .filter((option) => normalizeForMatch(option.label).includes(requested))
+    .filter(isRentCarsAirportOption));
+}
+
+function makeAirportOnlyFallbackTargets(requestedLocations) {
+  return requestedLocations.flatMap((location) => {
+    const requested = normalizeForMatch(location);
+    const fallbackLabels = AIRPORT_LOCATION_FALLBACKS[requested];
+    if (!fallbackLabels || requested.includes(",")) {
+      return [makeLocationTarget(location)];
+    }
+    return fallbackLabels.map((label) => makeLocationTarget(location, { label, value: "" }));
+  });
+}
+
+const AIRPORT_LOCATION_FALLBACKS = {
+  warszawa: [
+    "Warszawa, Lotnisko-Modlin",
+    "Warszawa, Lotnisko-Ok\u0119cie"
+  ],
+  krakow: ["Krak\u00f3w, Lotnisko-Balice"],
+  gdansk: ["Gda\u0144sk, Lotnisko-R\u0119biechowo"],
+  katowice: ["Katowice, Lotnisko-Pyrzowice"],
+  wroclaw: ["Wroc\u0142aw, Lotnisko-Strachowice"],
+  poznan: ["Pozna\u0144, Lotnisko-\u0141awica"]
+};
+
+function isRentCarsAirportOption(option) {
+  const label = normalizeForMatch(option?.label || option);
+  return [
+    "lotnisko",
+    "airport",
+    "aeroport",
+    "balice",
+    "rebiechowo",
+    "pyrzowice",
+    "strachowice",
+    "lawica",
+    "okecie",
+    "modlin"
+  ].some((token) => label.includes(token));
 }
 
 function uniqueLocationOptions(options) {
@@ -2092,5 +2141,6 @@ function normalizeCountryCode(value) {
 }
 
 module.exports = {
-  RentCarsScraper
+  RentCarsScraper,
+  findRentCarsLocationMatches
 };

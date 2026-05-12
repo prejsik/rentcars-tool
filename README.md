@@ -5,7 +5,7 @@ This is a separate RentCars.pl scraper module based on the DiscoverCars scraper 
 ## Features
 
 - opens RentCars.pl and fills the rental search form with Playwright
-- accepts multiple cities in one run and expands each city to all matching RentCars.pl pickup points
+- accepts multiple cities in one run and expands each city to matching RentCars.pl airport pickup points
 - supports rolling pickup start dates, specific start dates, pickup weekdays, and duration scenarios
 - checks RentCars.pl only with the `price_insurance` sort mode
 - extracts offers from JSON responses, embedded page data, or rendered DOM
@@ -68,7 +68,8 @@ It uploads a separate artifact named `rentcars-results-<run number>` with:
 
 The scheduled GitHub profile is:
 
-- all DiscoverCars cities mapped to RentCars.pl: `Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan`
+- around `03:17 Europe/Warsaw`, matching the DiscoverCars daily workflow
+- all DiscoverCars cities mapped to RentCars.pl airport pickup points: `Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan`
 - `rolling_days: 30`
 - `durations: 2,3,4,5,6,7,8,9,10`
 - `sort_orders: price_insurance`
@@ -103,7 +104,7 @@ node .\src\rentcars\cli.js --config .\rentcars.config.example.json --headed
 ## Notes
 
 - RentCars.pl uses a different Polish UI and search flow than DiscoverCars, so this module is intentionally separate under `src/rentcars`.
-- A city such as `Warszawa` is expanded to all matching pickup options, for example `Warszawa, Centrum`, `Warszawa, Lotnisko-Modlin`, and `Warszawa, Lotnisko-Okęcie`.
+- A city such as `Warszawa` is expanded only to airport pickup options, for example `Warszawa, Lotnisko-Modlin` and `Warszawa, Lotnisko-Okecie`.
 - The scheduled GitHub Actions workflow is separate too: `.github/workflows/rentcars-daily.yml`.
 - GitHub runs that workflow in the cloud, so the local laptop does not need to be turned on.
 - The RentCars.pl workflow uploads `rentcars-results-latest.json`, `rentcars-report.html`, `rentcars-run-log.txt`, `rentcars-run-error.txt`, and failure artifacts.

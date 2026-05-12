@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 
 const { loadConfig } = require("../src/rentcars/config");
 const { parseMoney, toCsv } = require("../src/rentcars/utils");
-const { RentCarsScraper } = require("../src/rentcars/scraper");
+const { RentCarsScraper, findRentCarsLocationMatches } = require("../src/rentcars/scraper");
 const { buildHtmlReport } = require("../src/rentcars/reportHtml");
 
 function runTest(name, fn) {
@@ -120,6 +120,29 @@ runTest("toCsv writes RentCars pickup and sort metadata", () => {
 
 runTest("scraper module exports RentCarsScraper", () => {
   assert.equal(typeof RentCarsScraper, "function");
+});
+
+runTest("city location expansion keeps only RentCars airport pickup points", () => {
+  const options = [
+    { value: "1", label: "Warszawa, Centrum" },
+    { value: "2", label: "Warszawa, Lotnisko-Modlin" },
+    { value: "3", label: "Warszawa, Lotnisko-Ok\u0119cie" },
+    { value: "4", label: "Krak\u00f3w, Centrum" },
+    { value: "5", label: "Krak\u00f3w, Lotnisko-Balice" }
+  ];
+
+  assert.deepEqual(
+    findRentCarsLocationMatches("Warszawa", options).map((option) => option.label),
+    ["Warszawa, Lotnisko-Modlin", "Warszawa, Lotnisko-Ok\u0119cie"]
+  );
+  assert.deepEqual(
+    findRentCarsLocationMatches("Krakow", options).map((option) => option.label),
+    ["Krak\u00f3w, Lotnisko-Balice"]
+  );
+  assert.deepEqual(
+    findRentCarsLocationMatches("Warszawa, Centrum", options).map((option) => option.label),
+    ["Warszawa, Centrum"]
+  );
 });
 
 runTest("buildHtmlReport renders RentCars title and top offer columns", () => {

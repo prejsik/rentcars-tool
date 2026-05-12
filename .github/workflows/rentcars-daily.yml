@@ -12,10 +12,10 @@ on:
       - "package-lock.json"
       - "README.md"
   # GitHub cron uses UTC. These two entries plus the Warsaw-hour gate below
-  # keep the real run at 03:00 Europe/Warsaw during both summer and winter time.
+  # keep the real run near 03:17 Europe/Warsaw during both summer and winter time.
   schedule:
-    - cron: "0 1 * * *"
-    - cron: "0 2 * * *"
+    - cron: "17 1 * * *"
+    - cron: "17 2 * * *"
   workflow_dispatch:
     inputs:
       locations:
@@ -45,7 +45,7 @@ env:
   SCHEDULE_ROLLING_DAYS: "30"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10"
   SCHEDULE_SPEED_MODE: "fast"
-  PUSH_TEST_LOCATIONS: "Warszawa"
+  PUSH_TEST_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
   PUSH_TEST_ROLLING_DAYS: "1"
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_SPEED_MODE: "fast"
@@ -54,7 +54,7 @@ jobs:
   rentcars:
     name: Run RentCars.pl scraper
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     environment:
       name: github-pages
       url: ${{ steps.pages-deployment.outputs.page_url }}
@@ -87,10 +87,10 @@ jobs:
           echo "Scheduled UTC trigger maps to Warsaw: $intended_warsaw_time"
 
           if [[ "$intended_warsaw_hour" == "03" ]]; then
-            echo "This scheduled trigger targets 03:00 in Warsaw, running scraper."
+            echo "This scheduled trigger targets 03:xx in Warsaw, running scraper."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "This scheduled trigger does not target 03:00 in Warsaw, skipping."
+            echo "This scheduled trigger does not target 03:xx in Warsaw, skipping."
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
 
