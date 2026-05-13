@@ -9,6 +9,7 @@ This is a separate RentCars.pl scraper module based on the DiscoverCars scraper 
 - supports rolling pickup start dates, specific start dates, pickup weekdays, and duration scenarios
 - checks RentCars.pl only with the `price_insurance` sort mode
 - extracts offers from JSON responses, embedded page data, or rendered DOM
+- loads the next "show more cars" result page when fewer than 3 providers are visible
 - continues processing when one location fails
 - prints sorted prices with provider name and rating, without car model names
 - saves the results to CSV
@@ -42,6 +43,7 @@ Default local profile in the example config:
 - `rollingDays: 30`
 - `durationsDays: [2]`
 - `sortOrders: ["price_insurance"]`
+- `maxAdditionalResultPages: 1`
 - starts from tomorrow and checks 30 rolling pickup start dates
 
 Generate the RentCars.pl HTML report from that JSON:

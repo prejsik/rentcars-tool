@@ -41,6 +41,7 @@ runTest("loadConfig uses RentCars defaults and output folders", () => {
   assert.equal(config.baseUrl, "https://rentcars.pl");
   assert.deepEqual(config.locations, ["Warszawa"]);
   assert.deepEqual(config.sortOrders, ["price_insurance"]);
+  assert.equal(config.maxAdditionalResultPages, 1);
   assert.match(config.outputCsv, /rentcars-results-/);
   assert.match(config.artifactsDir, /artifacts[\\/]rentcars$/);
 });
@@ -97,6 +98,28 @@ runTest("CLI durations override config durations for manual local runs", () => {
   ]);
 
   assert.deepEqual(config.durationDays, [5]);
+});
+
+runTest("CLI rolling days override config rolling days", () => {
+  const config = loadConfig([
+    "--config=rentcars.config.example.json",
+    "--locations=Warszawa",
+    "--rolling-days=1",
+    "--durations-days=2"
+  ]);
+
+  assert.equal(config.rollingDays, 1);
+  assert.equal(config.pickupDateOptions.length, 1);
+});
+
+runTest("CLI max additional result pages overrides config", () => {
+  const config = loadConfig([
+    "--config=rentcars.config.example.json",
+    "--locations=Warszawa",
+    "--max-additional-result-pages=2"
+  ]);
+
+  assert.equal(config.maxAdditionalResultPages, 2);
 });
 
 runTest("toCsv writes RentCars pickup and sort metadata", () => {

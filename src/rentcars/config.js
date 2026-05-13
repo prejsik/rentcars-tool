@@ -159,6 +159,26 @@ function parsePositiveIntegerInput(rawValue, fieldName) {
   return parsed;
 }
 
+function hasConfigValue(value) {
+  return value != null && value !== "";
+}
+
+function configValue(cli, fileConfig, keys, fallback = undefined) {
+  for (const key of keys) {
+    if (hasConfigValue(cli[key])) {
+      return cli[key];
+    }
+  }
+
+  for (const key of keys) {
+    if (hasConfigValue(fileConfig[key])) {
+      return fileConfig[key];
+    }
+  }
+
+  return fallback;
+}
+
 function parseSortOrdersInput(rawValue, fieldName) {
   if (rawValue == null) {
     return [];
@@ -332,19 +352,14 @@ function loadConfig(argv) {
     fileConfig.__configPath = configPath;
   }
 
-  const merged = {
-    ...fileConfig,
-    ...cli
-  };
-
   const locations = (cli.locations || []).length
     ? uniqueStrings(cli.locations)
     : uniqueStrings(Array.isArray(fileConfig.locations) ? fileConfig.locations : []);
 
-  const pickupDate = merged.pickupDate ?? merged["pickup-date"];
-  const pickupTime = merged.pickupTime ?? merged["pickup-time"];
-  const dropoffDate = merged.dropoffDate ?? merged["dropoff-date"];
-  const dropoffTime = merged.dropoffTime ?? merged["dropoff-time"];
+  const pickupDate = configValue(cli, fileConfig, ["pickupDate", "pickup-date"]);
+  const pickupTime = configValue(cli, fileConfig, ["pickupTime", "pickup-time"]);
+  const dropoffDate = configValue(cli, fileConfig, ["dropoffDate", "dropoff-date"]);
+  const dropoffTime = configValue(cli, fileConfig, ["dropoffTime", "dropoff-time"]);
 
   if (!locations.length) {
     throw new Error("At least one location is required. Use --location or provide locations in the config file.");
@@ -380,10 +395,7 @@ function loadConfig(argv) {
     : [defaultDurationDays];
 
   const rollingDays = parsePositiveIntegerInput(
-    merged.rollingDays
-    ?? merged["rolling-days"]
-    ?? merged.startRangeDays
-    ?? merged["start-range-days"],
+    configValue(cli, fileConfig, ["rollingDays", "rolling-days", "startRangeDays", "start-range-days"]),
     "rollingDays"
   );
 
@@ -433,7 +445,7 @@ function loadConfig(argv) {
   const defaultCsvName = `rentcars-results-${makeTimestampForFile()}.csv`;
 
   return {
-    baseUrl: normalizeWhitespace(merged.baseUrl || "https://rentcars.pl"),
+    baseUrl: normalizeWhitespace(configValue(cli, fileConfig, ["baseUrl", "base-url"], "https://rentcars.pl")),
     locations,
     pickupDate: parsedPickupDate.raw,
     pickupDateOptions,
@@ -443,24 +455,28 @@ function loadConfig(argv) {
     durationDays,
     rollingDays,
     sortOrders,
-    residenceCountry: normalizeWhitespace(merged.residenceCountry || merged["residence-country"] || "Poland"),
-    driverAge: Number.parseInt(merged.driverAge || merged["driver-age"] || "30", 10),
+    residenceCountry: normalizeWhitespace(configValue(cli, fileConfig, ["residenceCountry", "residence-country"], "Poland")),
+    driverAge: Number.parseInt(configValue(cli, fileConfig, ["driverAge", "driver-age"], "30"), 10),
     maxProvidersPerLocation: Number.parseInt(
-      merged.maxProvidersPerLocation || merged["max-providers-per-location"] || "25",
+      configValue(cli, fileConfig, ["maxProvidersPerLocation", "max-providers-per-location"], "25"),
       10
     ),
-    timeoutMs: Number.parseInt(merged.timeoutMs || merged["timeout-ms"] || "45000", 10),
-    speedMode: normalizeWhitespace(merged.speedMode || merged["speed-mode"] || "safe"),
+    maxAdditionalResultPages: parsePositiveIntegerInput(
+      configValue(cli, fileConfig, ["maxAdditionalResultPages", "max-additional-result-pages"], "1"),
+      "maxAdditionalResultPages"
+    ),
+    timeoutMs: Number.parseInt(configValue(cli, fileConfig, ["timeoutMs", "timeout-ms"], "45000"), 10),
+    speedMode: normalizeWhitespace(configValue(cli, fileConfig, ["speedMode", "speed-mode"], "safe")),
     locationConcurrency: parsePositiveIntegerInput(
-      merged.locationConcurrency || merged["location-concurrency"],
+      configValue(cli, fileConfig, ["locationConcurrency", "location-concurrency"]),
       "locationConcurrency"
     ) || 1,
-    headless: merged.headless !== false,
+    headless: configValue(cli, fileConfig, ["headless"], true) !== false,
     browserExecutablePath: normalizeWhitespace(
-      merged.browserExecutablePath || merged["browser-executable-path"] || ""
+      configValue(cli, fileConfig, ["browserExecutablePath", "browser-executable-path"], "")
     ) || null,
-    outputCsv: path.resolve(merged.outputCsv || merged["output-csv"] || path.join("output", defaultCsvName)),
-    artifactsDir: path.resolve(merged.artifactsDir || merged["artifacts-dir"] || path.join("artifacts", "rentcars")),
+    outputCsv: path.resolve(configValue(cli, fileConfig, ["outputCsv", "output-csv"], path.join("output", defaultCsvName))),
+    artifactsDir: path.resolve(configValue(cli, fileConfig, ["artifactsDir", "artifacts-dir"], path.join("artifacts", "rentcars"))),
     configPath: fileConfig.__configPath || null
   };
 }
@@ -496,6 +512,7 @@ Options:
   --duration-days NUMBER       Repeatable shortcut
   --sort-orders "suggested,price,price_insurance"
   --max-providers-per-location NUMBER
+  --max-additional-result-pages NUMBER
   --location-concurrency NUMBER
   --residence-country TEXT
   --driver-age NUMBER

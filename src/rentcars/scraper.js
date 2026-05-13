@@ -29,6 +29,7 @@ const COOKIE_BUTTON_PATTERNS = [
 
 const SEARCH_BUTTON_PATTERNS = [/^szukaj$/i, /sprawd(?:z|\u017a) cen(?:e|\u0119)/i, /search now/i, /^search$/i, /show cars/i, /find cars/i];
 const PICKUP_VALIDATION_ERROR_PATTERN = /punkt odbioru|pick-?up location/i;
+const LOAD_MORE_RESULTS_PATTERN = /zobacz\s+wi(?:e|\u0119)cej|poka(?:z|\u017c)\s+wi(?:e|\u0119)cej|wi(?:e|\u0119)cej\s+samochod|load more|show more|more cars/i;
 const RENTCARS_SORT_OPTIONS = new Map([
   ["suggested", { order: "suggested", label: "sugerowane", priceMode: "base" }],
   ["price", { order: "price", label: "po cenie", priceMode: "base" }],
@@ -247,13 +248,12 @@ class RentCarsScraper {
         await this.waitForResults(page);
         await this.waitForCollectorOffers(responseCollector, 20000);
 
-        offers = responseCollector.getOffers();
-        if (!offers.length) {
-          offers = await this.extractOffersFromPageScripts(page, target);
-        }
-        if (!offers.length) {
-          offers = await this.extractOffersFromDom(page, target);
-        }
+        const pageOffers = await this.collectOffersFromCurrentPage(page, target);
+        await this.loadAdditionalResultPages(page, target, responseCollector, pageOffers);
+        offers = dedupeOffers([
+          ...responseCollector.getOffers(),
+          ...pageOffers
+        ]);
       }
       if (!offers.length) {
         throw new Error("No offers could be extracted from the results page.");
@@ -1161,6 +1161,118 @@ class RentCarsScraper {
     }
   }
 
+  async collectOffersFromCurrentPage(page, targetInput) {
+    const target = makeLocationTarget(targetInput);
+    const scriptOffers = await this.extractOffersFromPageScripts(page, target).catch(() => []);
+    const domOffers = await this.extractOffersFromDom(page, target).catch(() => []);
+    return dedupeOffers([
+      ...scriptOffers,
+      ...domOffers
+    ]);
+  }
+
+  async loadAdditionalResultPages(page, targetInput, collector, accumulatedOffers) {
+    const maxAdditionalPages = clampPositiveInteger(this.config.maxAdditionalResultPages, 1, 0, 3);
+    if (maxAdditionalPages < 1) {
+      return;
+    }
+
+    const target = makeLocationTarget(targetInput);
+    const desiredProviders = Math.min(
+      3,
+      clampPositiveInteger(this.config.maxProvidersPerLocation, 3, 1, 25)
+    );
+    const seenUrls = new Set([page.url()]);
+
+    for (let pageIndex = 0; pageIndex < maxAdditionalPages; pageIndex += 1) {
+      const combinedOffers = dedupeOffers([
+        ...collector.getOffers(),
+        ...accumulatedOffers
+      ]);
+      if (countUniqueOfferProviders(combinedOffers) >= desiredProviders) {
+        return;
+      }
+
+      const control = await this.findLoadMoreControl(page);
+      if (!control) {
+        return;
+      }
+
+      const beforeUrl = page.url();
+      let loaded = false;
+      const href = normalizeWhitespace(control.href);
+
+      if (control.locator) {
+        const loadStatePromise = page
+          .waitForLoadState("domcontentloaded", { timeout: this.config.timeoutMs })
+          .catch(() => {});
+        const clicked = await control.locator
+          .click({ timeout: 5000, force: true })
+          .then(() => true)
+          .catch(() => false);
+        await loadStatePromise;
+        loaded = clicked || page.url() !== beforeUrl;
+      }
+
+      if (!loaded && href) {
+        const nextUrl = resolveUrl(href, beforeUrl);
+        if (!nextUrl || seenUrls.has(nextUrl)) {
+          return;
+        }
+
+        seenUrls.add(nextUrl);
+        loaded = await page
+          .goto(nextUrl, { waitUntil: "domcontentloaded", timeout: this.config.timeoutMs })
+          .then(() => true)
+          .catch(() => page.url() !== beforeUrl);
+      }
+
+      if (!loaded) {
+        return;
+      }
+
+      await this.waitForResults(page);
+      await this.waitForCollectorOffers(collector, 5000);
+      accumulatedOffers.push(...await this.collectOffersFromCurrentPage(page, target));
+    }
+  }
+
+  async findLoadMoreControl(page) {
+    const locators = [
+      page.locator(".load-more a[href], .load-more button").first(),
+      page.getByRole("link", { name: LOAD_MORE_RESULTS_PATTERN }).first(),
+      page.getByRole("button", { name: LOAD_MORE_RESULTS_PATTERN }).first(),
+      page.locator("a, button, [role='button']").filter({ hasText: LOAD_MORE_RESULTS_PATTERN }).first()
+    ];
+
+    for (const locator of locators) {
+      if (!(await locator.count().catch(() => 0))) {
+        continue;
+      }
+      if (!(await locator.isVisible().catch(() => false))) {
+        continue;
+      }
+
+      const disabled = await locator
+        .evaluate((element) => {
+          const className = String(element.className || "");
+          return Boolean(element.disabled)
+            || element.getAttribute("aria-disabled") === "true"
+            || /\bdisabled\b/i.test(className);
+        })
+        .catch(() => false);
+      if (disabled) {
+        continue;
+      }
+
+      const rawHref = normalizeWhitespace(await locator.getAttribute("href").catch(() => ""));
+      const href = /^(?:javascript:|#)/i.test(rawHref) ? "" : rawHref;
+      return { locator, href };
+    }
+
+    return null;
+  }
+
   async ensureConfiguredSearchPeriod(page) {
     return;
   }
@@ -1767,6 +1879,17 @@ function dedupeOffers(offers) {
   return unique;
 }
 
+function countUniqueOfferProviders(offers) {
+  const providers = new Set();
+  for (const offer of offers) {
+    const provider = normalizeRentCarsProviderName(offer.provider).toLowerCase();
+    if (provider && Number.isFinite(offer.totalPrice)) {
+      providers.add(provider);
+    }
+  }
+  return providers.size;
+}
+
 function selectBestOffersByProvider(offers, targetInput, maxProviders, forcedProviderNames) {
   const target = makeLocationTarget(targetInput);
   const byProvider = new Map();
@@ -2043,6 +2166,14 @@ function firstExistingPath(candidates) {
     }
   }
   return null;
+}
+
+function resolveUrl(value, baseUrl) {
+  try {
+    return new URL(value, baseUrl).href;
+  } catch {
+    return "";
+  }
 }
 
 function dedupeLocationCandidates(candidates) {
