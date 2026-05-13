@@ -170,18 +170,21 @@ jobs:
             | tee output/rentcars-run-log.txt
 
       - name: Generate RentCars.pl HTML report
-        if: steps.gate.outputs.should_run == 'true' && always()
+        id: report
+        if: always() && steps.gate.outputs.should_run == 'true'
         shell: bash
         run: |
           if [[ -f output/rentcars-results-latest.json ]]; then
             node src/rentcars/reportHtml.js output/rentcars-results-latest.json output/rentcars-report.html
+            echo "report_exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::RentCars JSON output is missing; report generation skipped."
+            echo "report_exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Ensure GitHub Pages is enabled
         id: pages-status
-        if: steps.gate.outputs.should_run == 'true'
+        if: always() && steps.gate.outputs.should_run == 'true' && steps.report.outputs.report_exists == 'true'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -250,23 +253,23 @@ jobs:
           echo "::warning::GitHub Pages is not enabled and could not be enabled automatically; Pages deploy skipped."
 
       - name: Prepare GitHub Pages site
-        if: steps.gate.outputs.should_run == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.gate.outputs.should_run == 'true' && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
         shell: bash
         run: |
           mkdir -p pages
           cp output/rentcars-report.html pages/index.html
           cp output/rentcars-report.html pages/report.html
-          cp output/rentcars-results-latest.json pages/rentcars-results-latest.json
-          cp output/rentcars-run-log.txt pages/rentcars-run-log.txt
-          cp output/rentcars-run-error.txt pages/rentcars-run-error.txt
+          [[ -f output/rentcars-results-latest.json ]] && cp output/rentcars-results-latest.json pages/rentcars-results-latest.json
+          [[ -f output/rentcars-run-log.txt ]] && cp output/rentcars-run-log.txt pages/rentcars-run-log.txt
+          [[ -f output/rentcars-run-error.txt ]] && cp output/rentcars-run-error.txt pages/rentcars-run-error.txt
 
       - name: Configure GitHub Pages
-        if: steps.gate.outputs.should_run == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.gate.outputs.should_run == 'true' && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
         uses: actions/configure-pages@v5
         continue-on-error: true
 
       - name: Upload GitHub Pages artifact
-        if: steps.gate.outputs.should_run == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.gate.outputs.should_run == 'true' && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
         uses: actions/upload-pages-artifact@v3
         continue-on-error: true
         with:
@@ -274,13 +277,13 @@ jobs:
 
       - name: Deploy GitHub Pages
         id: pages-deployment
-        if: steps.gate.outputs.should_run == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.gate.outputs.should_run == 'true' && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
         uses: actions/deploy-pages@v4
         continue-on-error: true
 
       - name: Upload RentCars.pl results
         id: upload
-        if: steps.gate.outputs.should_run == 'true' && always()
+        if: always() && steps.gate.outputs.should_run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: rentcars-results-${{ github.run_number }}
@@ -294,7 +297,7 @@ jobs:
           retention-days: 14
 
       - name: Notify Telegram
-        if: steps.gate.outputs.should_run == 'true' && steps.upload.outputs['artifact-url'] != ''
+        if: always() && steps.gate.outputs.should_run == 'true' && steps.upload.outputs['artifact-url'] != ''
         shell: bash
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

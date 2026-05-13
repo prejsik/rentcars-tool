@@ -66,6 +66,8 @@ It uploads a separate artifact named `rentcars-results-<run number>` with:
 - `output/rentcars-run-error.txt`
 - `artifacts/rentcars/**`
 
+During long scheduled runs, the scraper writes JSON snapshots after each completed scenario. If GitHub stops the run before the full 30-day profile finishes, the workflow can still publish a partial HTML report and send the Telegram link.
+
 The scheduled GitHub profile is:
 
 - around `03:17 Europe/Warsaw`, matching the DiscoverCars daily workflow

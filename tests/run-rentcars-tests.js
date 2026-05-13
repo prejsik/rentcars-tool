@@ -4,6 +4,7 @@ const { loadConfig } = require("../src/rentcars/config");
 const { parseMoney, toCsv } = require("../src/rentcars/utils");
 const { RentCarsScraper, findRentCarsLocationMatches } = require("../src/rentcars/scraper");
 const { buildHtmlReport } = require("../src/rentcars/reportHtml");
+const { buildRootPayload } = require("../src/rentcars/run");
 
 function runTest(name, fn) {
   try {
@@ -282,6 +283,25 @@ runTest("buildHtmlReport does not mark MM Cars Rental red at exactly 5 PLN per d
   });
 
   assert.doesNotMatch(html, /<td class="mm mm-top1-gap"/);
+});
+
+runTest("buildRootPayload and HTML report mark partial scheduled snapshots", () => {
+  const payload = buildRootPayload({
+    config: {
+      baseUrl: "https://rentcars.pl",
+      locations: ["Warszawa"],
+      sortOrders: ["price_insurance"]
+    },
+    scenarios: [],
+    startedAt: "2026-05-13T01:00:00.000Z",
+    durationMs: 1000,
+    expectedScenarioCount: 270
+  });
+  const html = buildHtmlReport(payload);
+
+  assert.equal(payload.is_partial, true);
+  assert.equal(payload.expected_scenario_count, 270);
+  assert.match(html, /Partial report: 0 \/ 270 scenarios completed/);
 });
 
 if (!process.exitCode) {

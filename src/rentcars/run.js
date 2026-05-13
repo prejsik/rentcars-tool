@@ -219,7 +219,7 @@ function buildScenarioPayload({ config, scenarioConfig, durationDays, results, f
   };
 }
 
-function buildRootPayload({ config, scenarios, startedAt, durationMs }) {
+function buildRootPayload({ config, scenarios, startedAt, durationMs, expectedScenarioCount = scenarios.length }) {
   return {
     generated_at: new Date().toISOString(),
     scraper: "rentcars",
@@ -228,6 +228,9 @@ function buildRootPayload({ config, scenarios, startedAt, durationMs }) {
     locations: config.locations,
     sort_orders: config.sortOrders,
     scenario_count: scenarios.length,
+    expected_scenario_count: expectedScenarioCount,
+    completed_scenario_count: scenarios.length,
+    is_partial: scenarios.length < expectedScenarioCount,
     execution_duration_ms: durationMs,
     execution_started_at: startedAt,
     scenarios
@@ -264,6 +267,19 @@ function formatOffer(offer) {
   return `${displayName} | ${Number(offer.total_price).toFixed(2)} ${offer.currency}`.trim();
 }
 
+function writePayloadSnapshot(runner, payload, jsonOnly) {
+  if (!runner.savePath) {
+    return;
+  }
+
+  const targetPath = path.resolve(runner.savePath);
+  writeTextFile(targetPath, `${JSON.stringify(payload, null, 2)}\n`);
+  if (!jsonOnly) {
+    const partialLabel = payload.is_partial ? "partial " : "";
+    console.log(`Saved ${partialLabel}JSON to ${targetPath}`);
+  }
+}
+
 async function main() {
   const startedAt = new Date().toISOString();
   const startedAtMs = Date.now();
@@ -277,6 +293,7 @@ async function main() {
   }
 
   const scenarios = [];
+  const expectedScenarioCount = config.pickupDateOptions.length * config.durationDays.length;
 
   for (const pickupDate of config.pickupDateOptions) {
     for (const durationDays of config.durationDays) {
@@ -303,6 +320,13 @@ async function main() {
       });
 
       scenarios.push(scenarioPayload);
+      writePayloadSnapshot(runner, buildRootPayload({
+        config,
+        scenarios,
+        startedAt,
+        durationMs: Date.now() - startedAtMs,
+        expectedScenarioCount
+      }), runner.jsonOnly);
 
       if (!runner.jsonOnly) {
         printScenarioTable(scenarioPayload, config.locations);
@@ -318,20 +342,15 @@ async function main() {
     config,
     scenarios,
     startedAt,
-    durationMs: Date.now() - startedAtMs
+    durationMs: Date.now() - startedAtMs,
+    expectedScenarioCount
   });
 
   if (runner.jsonOnly) {
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   }
 
-  if (runner.savePath) {
-    const targetPath = path.resolve(runner.savePath);
-    writeTextFile(targetPath, `${JSON.stringify(payload, null, 2)}\n`);
-    if (!runner.jsonOnly) {
-      console.log(`Saved JSON to ${targetPath}`);
-    }
-  }
+  writePayloadSnapshot(runner, payload, runner.jsonOnly);
 
   const hasResults = scenarios.some((scenario) => scenario.results.length > 0);
   if (!hasResults) {

@@ -273,6 +273,12 @@ function buildHtmlReport(payload) {
   const generatedAt = payload.generated_at || new Date().toISOString();
   const executionStartedAt = payload.execution_started_at || "";
   const executionDuration = formatDurationMs(payload.execution_duration_ms);
+  const progressText = Number.isFinite(Number(payload.expected_scenario_count))
+    ? `${Number(payload.completed_scenario_count ?? scenarios.length)} / ${Number(payload.expected_scenario_count)} scenarios`
+    : `${scenarios.length} scenarios`;
+  const partialNotice = payload.is_partial
+    ? `<div class="notice">Partial report: ${escapeHtml(progressText)} completed before the run stopped.</div>`
+    : "";
 
   return `<!doctype html>
 <html lang="pl">
@@ -411,6 +417,16 @@ function buildHtmlReport(payload) {
       padding-top: 12px;
     }
 
+    .notice {
+      border: 1px solid #d97706;
+      background: #fff7ed;
+      color: #7c2d12;
+      padding: 10px 12px;
+      margin: 0 0 18px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
     @media (max-width: 980px) {
       body { padding: 14px; }
       .scenario { overflow-x: auto; }
@@ -421,6 +437,7 @@ function buildHtmlReport(payload) {
 <body>
   <h1>RentCars.pl report</h1>
   <div class="meta">Generated at: ${escapeHtml(generatedAt)} | Time zone: ${escapeHtml(payload.time_zone || "Europe/Warsaw")} | Source: ${escapeHtml(payload.source_url || "https://rentcars.pl")}</div>
+  ${partialNotice}
   <div class="legend">
     <span><span class="badge mm">MM Cars Rental</span> MM Cars Rental in table</span>
     <span><span class="badge mm mm-close">MM close</span> MM Cars Rental max 10 PLN/day more expensive than a higher-ranked competitor</span>
