@@ -49,6 +49,8 @@ env:
   PUSH_TEST_ROLLING_DAYS: "1"
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_SPEED_MODE: "fast"
+  SCHEDULE_SCRAPER_TIMEOUT: "210m"
+  PUSH_TEST_SCRAPER_TIMEOUT: "45m"
 
 jobs:
   rentcars:
@@ -151,23 +153,47 @@ jobs:
           echo "Speed mode: $speed_mode"
 
       - name: Run RentCars.pl scraper
+        id: scraper
         if: steps.gate.outputs.should_run == 'true'
         shell: bash
         run: |
           mkdir -p output
-          set -o pipefail
 
-          node src/rentcars/run.js \
-            --config rentcars.config.example.json \
-            --locations="${{ steps.options.outputs.locations }}" \
-            --rolling-days="${{ steps.options.outputs.rolling_days }}" \
-            --durations-days="${{ steps.options.outputs.durations }}" \
-            --sort-orders=price_insurance \
-            --speed-mode="${{ steps.options.outputs.speed_mode }}" \
-            --timeout-ms=30000 \
-            --output-json output/rentcars-results-latest.json \
-            2> >(tee output/rentcars-run-error.txt >&2) \
-            | tee output/rentcars-run-log.txt
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            scraper_timeout="$PUSH_TEST_SCRAPER_TIMEOUT"
+          else
+            scraper_timeout="$SCHEDULE_SCRAPER_TIMEOUT"
+          fi
+
+          echo "Scraper timeout: $scraper_timeout"
+          set +e
+          timeout --kill-after=30s "$scraper_timeout" bash -c '
+            set -o pipefail
+            node src/rentcars/run.js \
+              --config rentcars.config.example.json \
+              --locations="${{ steps.options.outputs.locations }}" \
+              --rolling-days="${{ steps.options.outputs.rolling_days }}" \
+              --durations-days="${{ steps.options.outputs.durations }}" \
+              --sort-orders=price_insurance \
+              --speed-mode="${{ steps.options.outputs.speed_mode }}" \
+              --timeout-ms=30000 \
+              --output-json output/rentcars-results-latest.json \
+              2> >(tee output/rentcars-run-error.txt >&2) \
+              | tee output/rentcars-run-log.txt
+          '
+          scraper_status=$?
+          set -e
+
+          echo "scraper_status=$scraper_status" >> "$GITHUB_OUTPUT"
+          if [[ "$scraper_status" -eq 124 ]]; then
+            echo "::warning::RentCars scraper reached the controlled timeout after $scraper_timeout. Publishing the latest partial snapshot."
+          elif [[ "$scraper_status" -ne 0 ]]; then
+            echo "::warning::RentCars scraper exited with status $scraper_status. Publishing any files that were already created."
+          fi
+
+          if [[ ! -f output/rentcars-results-latest.json && "$scraper_status" -ne 0 ]]; then
+            exit "$scraper_status"
+          fi
 
       - name: Generate RentCars.pl HTML report
         id: report
@@ -311,11 +337,17 @@ jobs:
             exit 0
           fi
 
+          if [[ -f output/rentcars-results-latest.json ]]; then
+            progress=$(node -e "const fs=require('fs'); const data=JSON.parse(fs.readFileSync('output/rentcars-results-latest.json','utf8')); const completed=Number(data.completed_scenario_count ?? data.scenario_count ?? (data.scenarios || []).length); const expected=Number(data.expected_scenario_count ?? completed); const label=data.is_partial ? 'partial' : 'complete'; process.stdout.write(label + ' ' + completed + '/' + expected + ' scenarios');")
+          else
+            progress="no JSON report"
+          fi
+
           if [[ -n "$PAGE_URL" ]]; then
             report_url="${PAGE_URL%/}/report.html"
-            message=$(printf 'RentCars.pl: wyniki sa gotowe.\n\nRaport HTML:\n%s\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$report_url" "$ARTIFACT_URL" "$RUN_URL")
+            message=$(printf 'RentCars.pl: raport jest gotowy (%s).\n\nRaport HTML:\n%s\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$progress" "$report_url" "$ARTIFACT_URL" "$RUN_URL")
           else
-            message=$(printf 'RentCars.pl: wyniki sa gotowe.\n\nArtifact:\n%s\n\nGitHub Actions run:\n%s\n' "$ARTIFACT_URL" "$RUN_URL")
+            message=$(printf 'RentCars.pl: raport jest gotowy (%s).\n\nArtifact:\n%s\n\nGitHub Actions run:\n%s\n' "$progress" "$ARTIFACT_URL" "$RUN_URL")
           fi
 
           if ! curl --fail --show-error --silent \
