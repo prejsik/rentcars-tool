@@ -15,6 +15,7 @@ This is a separate RentCars.pl scraper module based on the DiscoverCars scraper 
 - prints sorted prices with provider name and rating, without car model names
 - saves the results to CSV
 - generates a compact HTML report with the execution duration at the end
+- splits GitHub scheduled runs into parallel start-date chunks and merges them into one final HTML report
 
 ## Run
 
@@ -61,15 +62,15 @@ The RentCars.pl GitHub workflow lives in a separate file:
 .github/workflows/rentcars-daily.yml
 ```
 
-It uploads a separate artifact named `rentcars-results-<run number>` with:
+It runs as a matrix workflow: each pickup start date is scraped in a separate chunk job, then the merge job combines all chunk JSON files into one final report and sends one Telegram message.
+
+It uploads a separate merged artifact named `rentcars-results-<run number>` with:
 
 - `output/rentcars-results-latest.json`
 - `output/rentcars-report.html`
-- `output/rentcars-run-log.txt`
-- `output/rentcars-run-error.txt`
-- `artifacts/rentcars/**`
+- `downloaded-parts/**` with the per-date chunk JSON/log/error files and failure artifacts
 
-During long scheduled runs, the scraper writes JSON snapshots after each completed scenario. If GitHub stops the run before the full 30-day profile finishes, the workflow can still publish a partial HTML report and send the Telegram link.
+During long scheduled runs, every date chunk writes JSON snapshots after each completed duration. If one chunk stops early, the merge job can still publish a partial HTML report from the chunks that uploaded data.
 
 The scheduled GitHub profile is:
 
@@ -80,7 +81,8 @@ The scheduled GitHub profile is:
 - `sort_orders: price_insurance`
 - `speed_mode: fast`
 - `location_concurrency: 6`
-- controlled scraper timeout: `330m`, with a `360m` job timeout
+- `max-parallel: 6` date chunks at once
+- controlled per-date chunk timeout: `90m`, with a `120m` chunk job timeout
 
 Manual GitHub runs can override locations, rolling days, durations, and speed mode from the `workflow_dispatch` form.
 Telegram notifications use the repository `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets.

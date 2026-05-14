@@ -5,6 +5,7 @@ const { parseMoney, toCsv } = require("../src/rentcars/utils");
 const { RentCarsScraper, findRentCarsLocationMatches } = require("../src/rentcars/scraper");
 const { buildHtmlReport } = require("../src/rentcars/reportHtml");
 const { buildRootPayload } = require("../src/rentcars/run");
+const { mergePayloads } = require("../src/rentcars/mergeResults");
 
 function runTest(name, fn) {
   try {
@@ -325,6 +326,72 @@ runTest("buildRootPayload and HTML report mark partial scheduled snapshots", () 
   assert.equal(payload.is_partial, true);
   assert.equal(payload.expected_scenario_count, 270);
   assert.match(html, /Partial report: 0 \/ 270 scenarios completed/);
+});
+
+runTest("mergePayloads combines matrix chunks into one sorted root report", () => {
+  const payload = mergePayloads([
+    {
+      file: "rentcars-results-2026-06-02.json",
+      payload: {
+        generated_at: "2026-05-14T03:02:00.000Z",
+        source_url: "https://rentcars.pl",
+        time_zone: "Europe/Warsaw",
+        locations: ["Warszawa"],
+        sort_orders: ["price_insurance"],
+        expected_scenario_count: 1,
+        scenarios: [
+          {
+            scenario_id: "2026-06-02-3",
+            start_date: "2026-06-02",
+            rental_days: 3,
+            results: [{ total_price: 300 }],
+            top_3_by_location: { "Warszawa, Lotnisko-Okecie": { price_insurance: [] } },
+            errors: []
+          }
+        ]
+      }
+    },
+    {
+      file: "rentcars-results-2026-06-01.json",
+      payload: {
+        generated_at: "2026-05-14T03:01:00.000Z",
+        expected_scenario_count: 1,
+        scenarios: [
+          {
+            scenario_id: "2026-06-01-2",
+            start_date: "2026-06-01",
+            rental_days: 2,
+            results: [],
+            top_3_by_location: {},
+            errors: []
+          },
+          {
+            scenario_id: "2026-06-01-2",
+            start_date: "2026-06-01",
+            rental_days: 2,
+            results: [{ total_price: 200 }],
+            top_3_by_location: { "Warszawa, Lotnisko-Modlin": { price_insurance: [] } },
+            errors: []
+          }
+        ]
+      }
+    }
+  ], {
+    expectedScenarioCount: 2,
+    startedAt: "2026-05-14T03:00:00.000Z",
+    generatedAt: "2026-05-14T03:01:30.000Z",
+    locations: ["Warszawa"],
+    sortOrders: ["price_insurance"],
+    baseUrl: "https://rentcars.pl"
+  });
+
+  assert.equal(payload.scenario_count, 2);
+  assert.equal(payload.completed_scenario_count, 2);
+  assert.equal(payload.expected_scenario_count, 2);
+  assert.equal(payload.is_partial, false);
+  assert.equal(payload.execution_duration_ms, 90000);
+  assert.deepEqual(payload.scenarios.map((scenario) => scenario.scenario_id), ["2026-06-01-2", "2026-06-02-3"]);
+  assert.equal(payload.scenarios[0].results.length, 1);
 });
 
 if (!process.exitCode) {

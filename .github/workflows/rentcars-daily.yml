@@ -50,22 +50,29 @@ env:
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10"
   SCHEDULE_SPEED_MODE: "fast"
   SCHEDULE_LOCATION_CONCURRENCY: "6"
+  SCHEDULE_CHUNK_SCRAPER_TIMEOUT: "90m"
   PUSH_TEST_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
   PUSH_TEST_ROLLING_DAYS: "1"
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_SPEED_MODE: "fast"
   PUSH_TEST_LOCATION_CONCURRENCY: "2"
-  SCHEDULE_SCRAPER_TIMEOUT: "330m"
-  PUSH_TEST_SCRAPER_TIMEOUT: "45m"
+  PUSH_TEST_CHUNK_SCRAPER_TIMEOUT: "45m"
 
 jobs:
-  rentcars:
-    name: Run RentCars.pl scraper
+  plan:
+    name: Plan RentCars.pl matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    environment:
-      name: github-pages
-      url: ${{ steps.pages-deployment.outputs.page_url }}
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+      locations: ${{ steps.options.outputs.locations }}
+      rolling_days: ${{ steps.options.outputs.rolling_days }}
+      durations: ${{ steps.options.outputs.durations }}
+      speed_mode: ${{ steps.options.outputs.speed_mode }}
+      location_concurrency: ${{ steps.options.outputs.location_concurrency }}
+      chunk_timeout: ${{ steps.options.outputs.chunk_timeout }}
+      expected_scenario_count: ${{ steps.options.outputs.expected_scenario_count }}
+      run_started_at: ${{ steps.options.outputs.run_started_at }}
+      matrix: ${{ steps.options.outputs.matrix }}
 
     steps:
       - name: Check Warsaw schedule gate
@@ -102,27 +109,7 @@ jobs:
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Checkout repository
-        if: steps.gate.outputs.should_run == 'true'
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        if: steps.gate.outputs.should_run == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install Node dependencies
-        if: steps.gate.outputs.should_run == 'true'
-        run: npm ci
-
-      - name: Install Playwright Chromium
-        if: steps.gate.outputs.should_run == 'true'
-        run: npx playwright install --with-deps chromium
-
-      - name: Resolve run options
-        if: steps.gate.outputs.should_run == 'true'
+      - name: Resolve matrix options
         id: options
         shell: bash
         env:
@@ -132,18 +119,33 @@ jobs:
           INPUT_SPEED_MODE: ${{ inputs.speed_mode }}
           INPUT_LOCATION_CONCURRENCY: ${{ inputs.location_concurrency }}
         run: |
+          if [[ "${{ steps.gate.outputs.should_run }}" != "true" ]]; then
+            echo 'matrix={"include":[{"start_date":"skip"}]}' >> "$GITHUB_OUTPUT"
+            echo "locations=" >> "$GITHUB_OUTPUT"
+            echo "rolling_days=0" >> "$GITHUB_OUTPUT"
+            echo "durations=" >> "$GITHUB_OUTPUT"
+            echo "speed_mode=fast" >> "$GITHUB_OUTPUT"
+            echo "location_concurrency=1" >> "$GITHUB_OUTPUT"
+            echo "chunk_timeout=1m" >> "$GITHUB_OUTPUT"
+            echo "expected_scenario_count=0" >> "$GITHUB_OUTPUT"
+            echo "run_started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if [[ "${{ github.event_name }}" == "push" ]]; then
             default_locations="$PUSH_TEST_LOCATIONS"
             default_rolling_days="$PUSH_TEST_ROLLING_DAYS"
             default_durations="$PUSH_TEST_DURATIONS"
             default_speed_mode="$PUSH_TEST_SPEED_MODE"
             default_location_concurrency="$PUSH_TEST_LOCATION_CONCURRENCY"
+            chunk_timeout="$PUSH_TEST_CHUNK_SCRAPER_TIMEOUT"
           else
             default_locations="$SCHEDULE_LOCATIONS"
             default_rolling_days="$SCHEDULE_ROLLING_DAYS"
             default_durations="$SCHEDULE_DURATIONS"
             default_speed_mode="$SCHEDULE_SPEED_MODE"
             default_location_concurrency="$SCHEDULE_LOCATION_CONCURRENCY"
+            chunk_timeout="$SCHEDULE_CHUNK_SCRAPER_TIMEOUT"
           fi
 
           locations="${INPUT_LOCATIONS:-$default_locations}"
@@ -152,78 +154,185 @@ jobs:
           speed_mode="${INPUT_SPEED_MODE:-$default_speed_mode}"
           location_concurrency="${INPUT_LOCATION_CONCURRENCY:-$default_location_concurrency}"
 
+          if ! [[ "$rolling_days" =~ ^[0-9]+$ ]] || [[ "$rolling_days" -lt 1 ]]; then
+            echo "::error::rolling_days must be a positive integer. Received: $rolling_days"
+            exit 1
+          fi
+
+          duration_count=0
+          IFS=',' read -ra duration_parts <<< "$durations"
+          for duration in "${duration_parts[@]}"; do
+            trimmed="${duration//[[:space:]]/}"
+            if [[ -n "$trimmed" ]]; then
+              duration_count=$((duration_count + 1))
+            fi
+          done
+
+          if [[ "$duration_count" -lt 1 ]]; then
+            echo "::error::durations must contain at least one value. Received: $durations"
+            exit 1
+          fi
+
+          rolling_days_number=$((10#$rolling_days))
+          expected_scenario_count=$((rolling_days_number * duration_count))
+          dates=()
+          for ((day_index=0; day_index<rolling_days_number; day_index++)); do
+            dates+=("$(TZ=Europe/Warsaw date -d "tomorrow +${day_index} days" +%F)")
+          done
+
+          matrix_json=$(node -e 'const dates = process.argv.slice(1); process.stdout.write(JSON.stringify({ include: dates.map((start_date) => ({ start_date })) }));' "${dates[@]}")
+          run_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
           echo "locations=$locations" >> "$GITHUB_OUTPUT"
           echo "rolling_days=$rolling_days" >> "$GITHUB_OUTPUT"
           echo "durations=$durations" >> "$GITHUB_OUTPUT"
           echo "speed_mode=$speed_mode" >> "$GITHUB_OUTPUT"
           echo "location_concurrency=$location_concurrency" >> "$GITHUB_OUTPUT"
+          echo "chunk_timeout=$chunk_timeout" >> "$GITHUB_OUTPUT"
+          echo "expected_scenario_count=$expected_scenario_count" >> "$GITHUB_OUTPUT"
+          echo "run_started_at=$run_started_at" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
 
           echo "Locations: $locations"
           echo "Rolling days: $rolling_days"
           echo "Durations: $durations"
+          echo "Expected scenarios: $expected_scenario_count"
           echo "Speed mode: $speed_mode"
           echo "Location concurrency: $location_concurrency"
+          echo "Chunk timeout: $chunk_timeout"
 
-      - name: Run RentCars.pl scraper
+  scrape:
+    name: Scrape ${{ matrix.start_date }}
+    needs: plan
+    if: needs.plan.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run RentCars.pl scraper for one start date
         id: scraper
-        if: steps.gate.outputs.should_run == 'true'
         shell: bash
         run: |
           mkdir -p output
+          json_path="output/rentcars-results-${{ matrix.start_date }}.json"
+          log_path="output/rentcars-run-${{ matrix.start_date }}-log.txt"
+          error_path="output/rentcars-run-${{ matrix.start_date }}-error.txt"
+          chunk_timeout="${{ needs.plan.outputs.chunk_timeout }}"
 
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            scraper_timeout="$PUSH_TEST_SCRAPER_TIMEOUT"
-          else
-            scraper_timeout="$SCHEDULE_SCRAPER_TIMEOUT"
-          fi
+          echo "Start date: ${{ matrix.start_date }}"
+          echo "Chunk timeout: $chunk_timeout"
 
-          echo "Scraper timeout: $scraper_timeout"
           set +e
-          timeout --kill-after=30s "$scraper_timeout" bash -c '
-            set -o pipefail
-            node src/rentcars/run.js \
-              --config rentcars.config.example.json \
-              --locations="${{ steps.options.outputs.locations }}" \
-              --rolling-days="${{ steps.options.outputs.rolling_days }}" \
-              --durations-days="${{ steps.options.outputs.durations }}" \
-              --sort-orders=price_insurance \
-              --speed-mode="${{ steps.options.outputs.speed_mode }}" \
-              --location-concurrency="${{ steps.options.outputs.location_concurrency }}" \
-              --timeout-ms=30000 \
-              --output-json output/rentcars-results-latest.json \
-              2> >(tee output/rentcars-run-error.txt >&2) \
-              | tee output/rentcars-run-log.txt
-          '
+          timeout --kill-after=30s "$chunk_timeout" node src/rentcars/run.js \
+            --config rentcars.config.example.json \
+            --locations="${{ needs.plan.outputs.locations }}" \
+            --start-dates="${{ matrix.start_date }}" \
+            --durations-days="${{ needs.plan.outputs.durations }}" \
+            --sort-orders=price_insurance \
+            --speed-mode="${{ needs.plan.outputs.speed_mode }}" \
+            --location-concurrency="${{ needs.plan.outputs.location_concurrency }}" \
+            --timeout-ms=30000 \
+            --output-json "$json_path" \
+            > >(tee "$log_path") \
+            2> >(tee "$error_path" >&2)
           scraper_status=$?
           set -e
 
           echo "scraper_status=$scraper_status" >> "$GITHUB_OUTPUT"
           if [[ "$scraper_status" -eq 124 ]]; then
-            echo "::warning::RentCars scraper reached the controlled timeout after $scraper_timeout. Publishing the latest partial snapshot."
+            echo "::warning::RentCars chunk ${{ matrix.start_date }} reached the controlled timeout after $chunk_timeout. Uploading the latest partial snapshot."
           elif [[ "$scraper_status" -ne 0 ]]; then
-            echo "::warning::RentCars scraper exited with status $scraper_status. Publishing any files that were already created."
+            echo "::warning::RentCars chunk ${{ matrix.start_date }} exited with status $scraper_status. Uploading any files that were already created."
           fi
 
-          if [[ ! -f output/rentcars-results-latest.json && "$scraper_status" -ne 0 ]]; then
-            exit "$scraper_status"
+          if [[ ! -f "$json_path" && "$scraper_status" -ne 0 ]]; then
+            echo "::warning::RentCars chunk ${{ matrix.start_date }} did not create a JSON snapshot. The merge job will publish the remaining completed chunks."
           fi
+
+      - name: Upload RentCars.pl chunk
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rentcars-part-${{ matrix.start_date }}
+          path: |
+            output/rentcars-results-${{ matrix.start_date }}.json
+            output/rentcars-run-${{ matrix.start_date }}-log.txt
+            output/rentcars-run-${{ matrix.start_date }}-error.txt
+            artifacts/rentcars/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  merge:
+    name: Merge and publish RentCars.pl report
+    needs:
+      - plan
+      - scrape
+    if: always() && needs.plan.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: github-pages
+      url: ${{ steps.pages-deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download RentCars.pl chunks
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: rentcars-part-*
+          path: downloaded-parts
+          merge-multiple: false
+
+      - name: Merge chunk JSON files
+        shell: bash
+        run: |
+          mkdir -p output
+          node src/rentcars/mergeResults.js \
+            --input-dir downloaded-parts \
+            --output-json output/rentcars-results-latest.json \
+            --expected-scenario-count="${{ needs.plan.outputs.expected_scenario_count }}" \
+            --started-at="${{ needs.plan.outputs.run_started_at }}" \
+            --base-url=https://rentcars.pl \
+            --locations="${{ needs.plan.outputs.locations }}" \
+            --sort-orders=price_insurance
 
       - name: Generate RentCars.pl HTML report
         id: report
-        if: always() && steps.gate.outputs.should_run == 'true'
         shell: bash
         run: |
-          if [[ -f output/rentcars-results-latest.json ]]; then
-            node src/rentcars/reportHtml.js output/rentcars-results-latest.json output/rentcars-report.html
-            echo "report_exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::RentCars JSON output is missing; report generation skipped."
-            echo "report_exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          node src/rentcars/reportHtml.js output/rentcars-results-latest.json output/rentcars-report.html
+          echo "report_exists=true" >> "$GITHUB_OUTPUT"
 
       - name: Ensure GitHub Pages is enabled
         id: pages-status
-        if: always() && steps.gate.outputs.should_run == 'true' && steps.report.outputs.report_exists == 'true'
+        if: always() && steps.report.outputs.report_exists == 'true'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -292,23 +401,21 @@ jobs:
           echo "::warning::GitHub Pages is not enabled and could not be enabled automatically; Pages deploy skipped."
 
       - name: Prepare GitHub Pages site
-        if: always() && steps.gate.outputs.should_run == 'true' && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
         shell: bash
         run: |
           mkdir -p pages
           cp output/rentcars-report.html pages/index.html
           cp output/rentcars-report.html pages/report.html
-          [[ -f output/rentcars-results-latest.json ]] && cp output/rentcars-results-latest.json pages/rentcars-results-latest.json
-          [[ -f output/rentcars-run-log.txt ]] && cp output/rentcars-run-log.txt pages/rentcars-run-log.txt
-          [[ -f output/rentcars-run-error.txt ]] && cp output/rentcars-run-error.txt pages/rentcars-run-error.txt
+          cp output/rentcars-results-latest.json pages/rentcars-results-latest.json
 
       - name: Configure GitHub Pages
-        if: always() && steps.gate.outputs.should_run == 'true' && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
         uses: actions/configure-pages@v5
         continue-on-error: true
 
       - name: Upload GitHub Pages artifact
-        if: always() && steps.gate.outputs.should_run == 'true' && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
         uses: actions/upload-pages-artifact@v3
         continue-on-error: true
         with:
@@ -316,27 +423,25 @@ jobs:
 
       - name: Deploy GitHub Pages
         id: pages-deployment
-        if: always() && steps.gate.outputs.should_run == 'true' && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
         uses: actions/deploy-pages@v4
         continue-on-error: true
 
-      - name: Upload RentCars.pl results
+      - name: Upload merged RentCars.pl results
         id: upload
-        if: always() && steps.gate.outputs.should_run == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rentcars-results-${{ github.run_number }}
           path: |
             output/rentcars-results-latest.json
             output/rentcars-report.html
-            output/rentcars-run-log.txt
-            output/rentcars-run-error.txt
-            artifacts/rentcars/**
+            downloaded-parts/**
           if-no-files-found: warn
           retention-days: 14
 
       - name: Notify Telegram
-        if: always() && steps.gate.outputs.should_run == 'true' && steps.upload.outputs['artifact-url'] != ''
+        if: always() && steps.upload.outputs['artifact-url'] != ''
         shell: bash
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -351,7 +456,7 @@ jobs:
           fi
 
           if [[ -f output/rentcars-results-latest.json ]]; then
-            progress=$(node -e "const fs=require('fs'); const data=JSON.parse(fs.readFileSync('output/rentcars-results-latest.json','utf8')); const completed=Number(data.completed_scenario_count ?? data.scenario_count ?? (data.scenarios || []).length); const expected=Number(data.expected_scenario_count ?? completed); const label=data.is_partial ? 'partial' : 'complete'; process.stdout.write(label + ' ' + completed + '/' + expected + ' scenarios');")
+            progress=$(node -e "const fs=require('fs'); const data=JSON.parse(fs.readFileSync('output/rentcars-results-latest.json','utf8')); const completed=Number(data.completed_scenario_count ?? data.scenario_count ?? (data.scenarios || []).length); const expected=Number(data.expected_scenario_count ?? completed); const label=data.is_partial ? 'partial' : 'complete'; const chunks=Number(data.chunk_count || 0); process.stdout.write(label + ' ' + completed + '/' + expected + ' scenarios' + (chunks ? ', chunks=' + chunks : ''));")
           else
             progress="no JSON report"
           fi
