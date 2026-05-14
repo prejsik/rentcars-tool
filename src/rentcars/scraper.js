@@ -246,7 +246,7 @@ class RentCarsScraper {
         await this.submitSearch(page);
         await this.ensureConfiguredSearchPeriod(page);
         await this.waitForResults(page);
-        await this.waitForCollectorOffers(responseCollector, 20000);
+        await this.waitForCollectorOffers(responseCollector, this.collectorWaitTimeoutMs());
 
         const pageOffers = await this.collectOffersFromCurrentPage(page, target);
         await this.loadAdditionalResultPages(page, target, responseCollector, pageOffers);
@@ -293,6 +293,17 @@ class RentCarsScraper {
 
   isFastMode() {
     return normalizeSpeedMode(this.config.speedMode) !== "safe";
+  }
+
+  collectorWaitTimeoutMs() {
+    const speedMode = normalizeSpeedMode(this.config.speedMode);
+    if (speedMode === "turbo") {
+      return 1000;
+    }
+    if (speedMode === "fast") {
+      return 3000;
+    }
+    return 8000;
   }
 
   async configureContext(context) {
@@ -1163,11 +1174,15 @@ class RentCarsScraper {
 
   async collectOffersFromCurrentPage(page, targetInput) {
     const target = makeLocationTarget(targetInput);
-    const scriptOffers = await this.extractOffersFromPageScripts(page, target).catch(() => []);
     const domOffers = await this.extractOffersFromDom(page, target).catch(() => []);
+    if (countUniqueOfferProviders(domOffers) >= 3) {
+      return dedupeOffers(domOffers);
+    }
+
+    const scriptOffers = await this.extractOffersFromPageScripts(page, target).catch(() => []);
     return dedupeOffers([
-      ...scriptOffers,
-      ...domOffers
+      ...domOffers,
+      ...scriptOffers
     ]);
   }
 
@@ -1232,7 +1247,7 @@ class RentCarsScraper {
       }
 
       await this.waitForResults(page);
-      await this.waitForCollectorOffers(collector, 5000);
+      await this.waitForCollectorOffers(collector, Math.min(this.collectorWaitTimeoutMs(), 5000));
       accumulatedOffers.push(...await this.collectOffersFromCurrentPage(page, target));
     }
   }

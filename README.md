@@ -10,6 +10,7 @@ This is a separate RentCars.pl scraper module based on the DiscoverCars scraper 
 - checks RentCars.pl only with the `price_insurance` sort mode
 - extracts offers from JSON responses, embedded page data, or rendered DOM
 - loads the next "show more cars" result page when fewer than 3 providers are visible
+- in fast mode, prefers visible DOM offers and avoids long waits for optional network JSON payloads
 - continues processing when one location fails
 - prints sorted prices with provider name and rating, without car model names
 - saves the results to CSV
