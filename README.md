@@ -78,6 +78,8 @@ The scheduled GitHub profile is:
 - `durations: 2,3,4,5,6,7,8,9,10`
 - `sort_orders: price_insurance`
 - `speed_mode: fast`
+- `location_concurrency: 6`
+- controlled scraper timeout: `330m`, with a `360m` job timeout
 
 Manual GitHub runs can override locations, rolling days, durations, and speed mode from the `workflow_dispatch` form.
 Telegram notifications use the repository `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets.

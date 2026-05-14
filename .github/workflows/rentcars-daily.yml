@@ -34,6 +34,10 @@ on:
         description: "Scraper speed mode: safe, fast, or turbo"
         required: true
         default: "fast"
+      location_concurrency:
+        description: "Parallel RentCars.pl pickup locations per scenario"
+        required: true
+        default: "6"
 
 permissions:
   contents: read
@@ -45,18 +49,20 @@ env:
   SCHEDULE_ROLLING_DAYS: "30"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10"
   SCHEDULE_SPEED_MODE: "fast"
+  SCHEDULE_LOCATION_CONCURRENCY: "6"
   PUSH_TEST_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
   PUSH_TEST_ROLLING_DAYS: "1"
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_SPEED_MODE: "fast"
-  SCHEDULE_SCRAPER_TIMEOUT: "210m"
+  PUSH_TEST_LOCATION_CONCURRENCY: "2"
+  SCHEDULE_SCRAPER_TIMEOUT: "330m"
   PUSH_TEST_SCRAPER_TIMEOUT: "45m"
 
 jobs:
   rentcars:
     name: Run RentCars.pl scraper
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     environment:
       name: github-pages
       url: ${{ steps.pages-deployment.outputs.page_url }}
@@ -124,33 +130,39 @@ jobs:
           INPUT_ROLLING_DAYS: ${{ inputs.rolling_days }}
           INPUT_DURATIONS: ${{ inputs.durations }}
           INPUT_SPEED_MODE: ${{ inputs.speed_mode }}
+          INPUT_LOCATION_CONCURRENCY: ${{ inputs.location_concurrency }}
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then
             default_locations="$PUSH_TEST_LOCATIONS"
             default_rolling_days="$PUSH_TEST_ROLLING_DAYS"
             default_durations="$PUSH_TEST_DURATIONS"
             default_speed_mode="$PUSH_TEST_SPEED_MODE"
+            default_location_concurrency="$PUSH_TEST_LOCATION_CONCURRENCY"
           else
             default_locations="$SCHEDULE_LOCATIONS"
             default_rolling_days="$SCHEDULE_ROLLING_DAYS"
             default_durations="$SCHEDULE_DURATIONS"
             default_speed_mode="$SCHEDULE_SPEED_MODE"
+            default_location_concurrency="$SCHEDULE_LOCATION_CONCURRENCY"
           fi
 
           locations="${INPUT_LOCATIONS:-$default_locations}"
           rolling_days="${INPUT_ROLLING_DAYS:-$default_rolling_days}"
           durations="${INPUT_DURATIONS:-$default_durations}"
           speed_mode="${INPUT_SPEED_MODE:-$default_speed_mode}"
+          location_concurrency="${INPUT_LOCATION_CONCURRENCY:-$default_location_concurrency}"
 
           echo "locations=$locations" >> "$GITHUB_OUTPUT"
           echo "rolling_days=$rolling_days" >> "$GITHUB_OUTPUT"
           echo "durations=$durations" >> "$GITHUB_OUTPUT"
           echo "speed_mode=$speed_mode" >> "$GITHUB_OUTPUT"
+          echo "location_concurrency=$location_concurrency" >> "$GITHUB_OUTPUT"
 
           echo "Locations: $locations"
           echo "Rolling days: $rolling_days"
           echo "Durations: $durations"
           echo "Speed mode: $speed_mode"
+          echo "Location concurrency: $location_concurrency"
 
       - name: Run RentCars.pl scraper
         id: scraper
@@ -176,6 +188,7 @@ jobs:
               --durations-days="${{ steps.options.outputs.durations }}" \
               --sort-orders=price_insurance \
               --speed-mode="${{ steps.options.outputs.speed_mode }}" \
+              --location-concurrency="${{ steps.options.outputs.location_concurrency }}" \
               --timeout-ms=30000 \
               --output-json output/rentcars-results-latest.json \
               2> >(tee output/rentcars-run-error.txt >&2) \
