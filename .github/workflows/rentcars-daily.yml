@@ -12,10 +12,10 @@ on:
       - "package-lock.json"
       - "README.md"
   # GitHub cron uses UTC. These two entries plus the Warsaw-hour gate below
-  # keep the real run near 03:17 Europe/Warsaw during both summer and winter time.
+  # keep the real run near 02:17 Europe/Warsaw during both summer and winter time.
   schedule:
+    - cron: "17 0 * * *"
     - cron: "17 1 * * *"
-    - cron: "17 2 * * *"
   workflow_dispatch:
     inputs:
       locations:
@@ -101,11 +101,11 @@ jobs:
           echo "Schedule expression: $trigger_schedule"
           echo "Scheduled UTC trigger maps to Warsaw: $intended_warsaw_time"
 
-          if [[ "$intended_warsaw_hour" == "03" ]]; then
-            echo "This scheduled trigger targets 03:xx in Warsaw, running scraper."
+          if [[ "$intended_warsaw_hour" == "02" ]]; then
+            echo "This scheduled trigger targets 02:xx in Warsaw, running scraper."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "This scheduled trigger does not target 03:xx in Warsaw, skipping."
+            echo "This scheduled trigger does not target 02:xx in Warsaw, skipping."
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
 
