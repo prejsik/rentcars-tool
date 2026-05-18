@@ -74,7 +74,7 @@ During long scheduled runs, every date chunk writes JSON snapshots after each co
 
 The scheduled GitHub profile is:
 
-- around `02:17 Europe/Warsaw`
+- around `01:17 Europe/Warsaw`
 - all DiscoverCars cities mapped to RentCars.pl airport pickup points: `Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan`
 - `rolling_days: 30`
 - `durations: 2,3,4,5,6,7,8,9,10`
