@@ -184,6 +184,15 @@ function formatMoney(value, currency = "") {
   return `${value.toFixed(2)}${currency ? ` ${currency}` : ""}`;
 }
 
+function dailyPrice(totalPrice, rentalDays) {
+  const total = Number(totalPrice);
+  const days = Number(rentalDays);
+  if (!Number.isFinite(total) || !Number.isFinite(days) || days <= 0) {
+    return null;
+  }
+  return total / days;
+}
+
 function compareByPriceAscending(left, right) {
   return left.totalPrice - right.totalPrice;
 }
@@ -200,7 +209,7 @@ function toCsv(rows) {
     "dropoff_date",
     "provider",
     "provider_rating",
-    "total_price",
+    "daily_price",
     "currency",
     "source"
   ];
@@ -219,7 +228,7 @@ function toCsv(rows) {
         row.dropoffDate ?? "",
         row.provider,
         Number.isFinite(row.providerRating) ? row.providerRating : "",
-        row.totalPrice.toFixed(2),
+        formatDailyPriceForCsv(row),
         row.currency || "",
         row.source || ""
       ]
@@ -229,6 +238,15 @@ function toCsv(rows) {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+function formatDailyPriceForCsv(row) {
+  const calculated = dailyPrice(row.totalPrice ?? row.total_price, row.durationDays ?? row.rental_days);
+  if (calculated != null) {
+    return calculated.toFixed(2);
+  }
+  const fallback = Number(row.dailyPrice ?? row.daily_price);
+  return Number.isFinite(fallback) ? fallback.toFixed(2) : "";
 }
 
 function escapeCsv(value) {
@@ -250,6 +268,7 @@ function safeFilePart(value) {
 
 module.exports = {
   compareByPriceAscending,
+  dailyPrice,
   ensureDir,
   formatMoney,
   makeTimestampForFile,

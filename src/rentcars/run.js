@@ -3,7 +3,7 @@
 const path = require("path");
 const { loadConfig, printHelp: printConfigHelp } = require("./config");
 const { RentCarsScraper } = require("./scraper");
-const { normalizeWhitespace, writeTextFile } = require("./utils");
+const { dailyPrice, normalizeWhitespace, writeTextFile } = require("./utils");
 
 function parseRunnerArgs(argv) {
   const runner = {
@@ -99,6 +99,7 @@ function normalizeProviderName(value) {
 
 function mapOffer(row, scenario) {
   const pickupLocation = row.pickupLocation || row.location;
+  const totalPrice = Number(row.totalPrice);
   return {
     location: pickupLocation,
     requested_location: row.requestedLocation || row.location,
@@ -109,7 +110,8 @@ function mapOffer(row, scenario) {
     price_mode: row.priceMode || "base",
     provider_name: normalizeProviderName(row.provider),
     provider_rating: Number.isFinite(row.providerRating) ? row.providerRating : null,
-    total_price: Number(row.totalPrice),
+    total_price: totalPrice,
+    daily_price: dailyPrice(totalPrice, scenario.durationDays),
     currency: normalizeCurrency(row.currency),
     rental_days: scenario.durationDays,
     pickup_date: toIsoLocalDateTime(scenario.pickupDate, scenario.pickupTime),
@@ -264,7 +266,11 @@ function formatOffer(offer) {
   const providerName = normalizeWhitespace(offer.provider_name);
   const rating = providerRatingText(offer.provider_rating);
   const displayName = rating ? `${providerName} (${rating})` : providerName;
-  return `${displayName} | ${Number(offer.total_price).toFixed(2)} ${offer.currency}`.trim();
+  const pricePerDay = dailyPrice(offer.total_price, offer.rental_days);
+  const priceText = pricePerDay == null
+    ? "Not available"
+    : `${pricePerDay.toFixed(2)} ${offer.currency || ""}/day`.trim();
+  return `${displayName} | ${priceText}`.trim();
 }
 
 function writePayloadSnapshot(runner, payload, jsonOnly) {

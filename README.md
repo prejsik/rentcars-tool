@@ -12,7 +12,7 @@ This is a separate RentCars.pl scraper module based on the DiscoverCars scraper 
 - loads the next "show more cars" result page when fewer than 3 providers are visible
 - in fast mode, prefers visible DOM offers and avoids long waits for optional network JSON payloads
 - continues processing when one location fails
-- prints sorted prices with provider name and rating, without car model names
+- prints sorted daily prices with provider name and rating, without car model names
 - saves the results to CSV
 - generates a compact HTML report with the execution duration at the end
 - splits GitHub scheduled runs into parallel start-date chunks and merges them into one final HTML report

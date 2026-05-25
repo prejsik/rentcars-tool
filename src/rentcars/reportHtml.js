@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { dailyPrice } = require("./utils");
 
 const MM_CLOSE_PRICE_PER_DAY_THRESHOLD_PLN = 10;
 const MM_TOP1_RUNNER_UP_PRICE_PER_DAY_THRESHOLD_PLN = 5;
@@ -128,7 +129,13 @@ function formatOfferPrice(offer) {
   if (!offer || !Number.isFinite(Number(offer.total_price))) {
     return "Not available";
   }
-  return `${Number(offer.total_price).toFixed(2)} ${offer.currency || ""}`.trim();
+  const pricePerDay = Number.isFinite(Number(offer.daily_price))
+    ? Number(offer.daily_price)
+    : dailyPrice(offer.total_price, offer.rental_days);
+  if (pricePerDay == null) {
+    return "Not available";
+  }
+  return `${pricePerDay.toFixed(2)} ${offer.currency || ""}/day`.trim();
 }
 
 function buildPriceCell(offer, rankedOffers) {
@@ -253,11 +260,11 @@ function buildScenarioTable(rootPayload, scenarioPayload, index, total) {
           <th>location</th>
           <th>sort_order</th>
           <th>top1_offer</th>
-          <th>top1_price</th>
+          <th>top1_daily_price</th>
           <th>top2_offer</th>
-          <th>top2_price</th>
+          <th>top2_daily_price</th>
           <th>top3_offer</th>
-          <th>top3_price</th>
+          <th>top3_daily_price</th>
         </tr>
       </thead>
       <tbody>

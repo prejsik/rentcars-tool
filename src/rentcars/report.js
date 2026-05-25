@@ -1,6 +1,7 @@
 const path = require("path");
 const {
   compareByPriceAscending,
+  dailyPrice,
   formatMoney,
   toCsv,
   writeTextFile
@@ -18,7 +19,7 @@ function printResultsTable(results) {
     location: item.location,
     sort_order: item.sortLabel || item.sortOrder || "",
     provider: formatProviderForDisplay(item.provider, item.providerRating),
-    total_price: formatMoney(item.totalPrice, item.currency)
+    daily_price: formatDailyMoney(item)
   }));
 
   if (!rows.length) {
@@ -167,11 +168,20 @@ function printScenarioRankings(sortedRows, topLimit) {
         sort_order: row.sortLabel || row.sortOrder || "",
         rank: row.rank,
         provider: formatProviderForDisplay(row.provider, row.providerRating),
-        total_price: formatMoney(row.totalPrice, row.currency),
+        daily_price: formatDailyMoney(row),
         source: row.source || ""
       }))
     );
   }
+}
+
+function formatDailyMoney(row) {
+  const pricePerDay = dailyPrice(row.totalPrice, row.durationDays);
+  if (pricePerDay == null) {
+    return "";
+  }
+  const money = formatMoney(pricePerDay, row.currency);
+  return money ? `${money}/day` : "";
 }
 
 function formatProviderRating(rating) {

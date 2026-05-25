@@ -131,6 +131,7 @@ runTest("toCsv writes RentCars pickup and sort metadata", () => {
       pickupLocationId: "16",
       sortOrder: "price",
       priceMode: "base",
+      durationDays: 2,
       provider: "TM Flota",
       providerRating: 5,
       totalPrice: 199,
@@ -139,8 +140,8 @@ runTest("toCsv writes RentCars pickup and sort metadata", () => {
     }
   ]);
 
-  assert.match(csv, /^requested_location,location,pickup_location_id,sort_order,price_mode,duration_days,pickup_date,dropoff_date,provider,provider_rating,total_price,currency,source/);
-  assert.match(csv, /Warszawa,"Warszawa, Centrum",16,price,base,,,,TM Flota,5,199\.00,PLN,dom/);
+  assert.match(csv, /^requested_location,location,pickup_location_id,sort_order,price_mode,duration_days,pickup_date,dropoff_date,provider,provider_rating,daily_price,currency,source/);
+  assert.match(csv, /Warszawa,"Warszawa, Centrum",16,price,base,2,,,TM Flota,5,99\.50,PLN,dom/);
 });
 
 runTest("scraper module exports RentCarsScraper", () => {
@@ -222,7 +223,9 @@ runTest("buildHtmlReport renders RentCars title and top offer columns", () => {
 
   assert.match(html, /RentCars\.pl report/);
   assert.match(html, /top1_offer/);
+  assert.match(html, /top1_daily_price/);
   assert.match(html, /TM Flota \(5\)/);
+  assert.match(html, /99\.50 PLN\/day/);
   assert.match(html, /Warszawa, Centrum/);
   assert.match(html, /MM Cars Rental \(4\.5\)/);
   assert.match(html, /class="mm/);
@@ -267,7 +270,7 @@ runTest("buildHtmlReport marks MM Cars Rental red when top1 beats top2 by more t
   });
 
   assert.match(html, /class="mm mm-top1-gap">MM Cars Rental \(4\.5\)/);
-  assert.match(html, /class="mm mm-top1-gap">198\.00 PLN/);
+  assert.match(html, /class="mm mm-top1-gap">99\.00 PLN\/day/);
 });
 
 runTest("buildHtmlReport does not mark MM Cars Rental red at exactly 5 PLN per day ahead", () => {
