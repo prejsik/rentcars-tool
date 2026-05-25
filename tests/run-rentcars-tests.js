@@ -229,11 +229,14 @@ runTest("buildHtmlReport renders RentCars title and top offer columns", () => {
   assert.match(html, /Warszawa, Centrum/);
   assert.match(html, /MM Cars Rental \(4\.5\)/);
   assert.match(html, /class="mm/);
+  assert.match(html, /\.mm-close \{\s+background: var\(--red-bg\);/);
+  assert.match(html, /\.mm-top1-gap \{\s+background: var\(--blue-bg\);/);
+  assert.match(html, /more than 10 PLN\/day/);
   assert.match(html, /Execution duration: 1m 1s \(61000 ms\)/);
   assert.doesNotMatch(html, /Toyota Aygo/);
 });
 
-runTest("buildHtmlReport marks MM Cars Rental red when top1 beats top2 by more than 5 PLN per day", () => {
+runTest("buildHtmlReport marks MM Cars Rental top1 when top2 is more than 10 PLN per day higher", () => {
   const html = buildHtmlReport({
     generated_at: "2026-05-04T16:00:00.000Z",
     locations: ["Warszawa"],
@@ -258,7 +261,7 @@ runTest("buildHtmlReport marks MM Cars Rental red when top1 beats top2 by more t
               {
                 provider_name: "TOPCARS",
                 provider_rating: 4.3,
-                total_price: 210.01,
+                total_price: 218.01,
                 currency: "PLN",
                 rental_days: 2
               }
@@ -273,7 +276,7 @@ runTest("buildHtmlReport marks MM Cars Rental red when top1 beats top2 by more t
   assert.match(html, /class="mm mm-top1-gap">99\.00 PLN\/day/);
 });
 
-runTest("buildHtmlReport does not mark MM Cars Rental red at exactly 5 PLN per day ahead", () => {
+runTest("buildHtmlReport does not mark MM Cars Rental top1 at exactly 10 PLN per day ahead", () => {
   const html = buildHtmlReport({
     generated_at: "2026-05-04T16:00:00.000Z",
     locations: ["Warszawa"],
@@ -298,7 +301,7 @@ runTest("buildHtmlReport does not mark MM Cars Rental red at exactly 5 PLN per d
               {
                 provider_name: "TOPCARS",
                 provider_rating: 4.3,
-                total_price: 208,
+                total_price: 218,
                 currency: "PLN",
                 rental_days: 2
               }
