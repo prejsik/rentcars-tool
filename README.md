@@ -8,6 +8,7 @@ This is a separate RentCars.pl scraper module based on the DiscoverCars scraper 
 - accepts multiple cities in one run and expands each city to matching RentCars.pl airport pickup points
 - supports rolling pickup start dates, specific start dates, pickup weekdays, and duration scenarios
 - checks RentCars.pl only with the `price_insurance` sort mode
+- searches RentCars.pl with automatic transmission filtering when that filter is available
 - extracts offers from JSON responses, embedded page data, or rendered DOM
 - loads the next "show more cars" result page when fewer than 3 providers are visible
 - in fast mode, prefers visible DOM offers and avoids long waits for optional network JSON payloads
@@ -45,6 +46,7 @@ Default local profile in the example config:
 - `rollingDays: 30`
 - `durationsDays: [2]`
 - `sortOrders: ["price_insurance"]`
+- `transmission: "automatic"`
 - `maxAdditionalResultPages: 1`
 - starts from tomorrow and checks 30 rolling pickup start dates
 
@@ -101,6 +103,7 @@ node .\src\rentcars\cli.js `
   --rolling-days 1 `
   --durations-days 2 `
   --sort-orders "price_insurance" `
+  --transmission "automatic" `
   --output-csv .\output\rentcars-results.csv
 ```
 

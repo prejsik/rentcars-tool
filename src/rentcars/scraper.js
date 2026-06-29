@@ -30,6 +30,8 @@ const COOKIE_BUTTON_PATTERNS = [
 const SEARCH_BUTTON_PATTERNS = [/^szukaj$/i, /sprawd(?:z|\u017a) cen(?:e|\u0119)/i, /search now/i, /^search$/i, /show cars/i, /find cars/i];
 const PICKUP_VALIDATION_ERROR_PATTERN = /punkt odbioru|pick-?up location/i;
 const LOAD_MORE_RESULTS_PATTERN = /zobacz\s+wi(?:e|\u0119)cej|poka(?:z|\u017c)\s+wi(?:e|\u0119)cej|wi(?:e|\u0119)cej\s+samochod|load more|show more|more cars/i;
+const AUTOMATIC_TRANSMISSION_PATTERN = /automatyczna|automatic|automat\b/i;
+const MANUAL_TRANSMISSION_PATTERN = /manualna|manual\b|r\u0119czna|reczna/i;
 const RENTCARS_SORT_OPTIONS = new Map([
   ["suggested", { order: "suggested", label: "sugerowane", priceMode: "base" }],
   ["price", { order: "price", label: "po cenie", priceMode: "base" }],
@@ -246,6 +248,12 @@ class RentCarsScraper {
         await this.submitSearch(page);
         await this.ensureConfiguredSearchPeriod(page);
         await this.waitForResults(page);
+        if (this.prefersAutomaticTransmission()) {
+          responseCollector.clear();
+          if (await this.applyAutomaticTransmissionFilter(page)) {
+            console.log(`FLT ${formatSearchTarget(target)} -> automatic transmission`);
+          }
+        }
         await this.waitForCollectorOffers(responseCollector, this.collectorWaitTimeoutMs());
 
         const pageOffers = await this.collectOffersFromCurrentPage(page, target);
@@ -260,7 +268,7 @@ class RentCarsScraper {
       }
 
       const locationOffers = selectBestOffersByProvider(
-        offers,
+        this.filterOffersForConfiguredTransmission(offers),
         target,
         this.config.maxProvidersPerLocation,
         this.config.focusProviders || []
@@ -391,7 +399,7 @@ class RentCarsScraper {
 
     return {
       add: (entries) => {
-        for (const entry of entries) {
+        for (const entry of this.filterOffersForConfiguredTransmission(entries)) {
           const key = `${entry.provider}|${entry.totalPrice}|${entry.location}|${entry.sortOrder || ""}|${entry.priceMode || ""}`;
           if (seenKeys.has(key)) {
             continue;
@@ -399,6 +407,10 @@ class RentCarsScraper {
           seenKeys.add(key);
           offers.push(entry);
         }
+      },
+      clear: () => {
+        offers.length = 0;
+        seenKeys.clear();
       },
       getOffers: () => [...offers]
     };
@@ -1174,16 +1186,20 @@ class RentCarsScraper {
 
   async collectOffersFromCurrentPage(page, targetInput) {
     const target = makeLocationTarget(targetInput);
-    const domOffers = await this.extractOffersFromDom(page, target).catch(() => []);
+    const domOffers = this.filterOffersForConfiguredTransmission(
+      await this.extractOffersFromDom(page, target).catch(() => [])
+    );
     if (countUniqueOfferProviders(domOffers) >= 3) {
       return dedupeOffers(domOffers);
     }
 
-    const scriptOffers = await this.extractOffersFromPageScripts(page, target).catch(() => []);
-    return dedupeOffers([
+    const scriptOffers = this.filterOffersForConfiguredTransmission(
+      await this.extractOffersFromPageScripts(page, target).catch(() => [])
+    );
+    return this.filterOffersForConfiguredTransmission(dedupeOffers([
       ...domOffers,
       ...scriptOffers
-    ]);
+    ]));
   }
 
   async loadAdditionalResultPages(page, targetInput, collector, accumulatedOffers) {
@@ -1204,7 +1220,7 @@ class RentCarsScraper {
         ...collector.getOffers(),
         ...accumulatedOffers
       ]);
-      if (countUniqueOfferProviders(combinedOffers) >= desiredProviders) {
+      if (countUniqueOfferProviders(this.filterOffersForConfiguredTransmission(combinedOffers)) >= desiredProviders) {
         return;
       }
 
@@ -1286,6 +1302,109 @@ class RentCarsScraper {
     }
 
     return null;
+  }
+
+  prefersAutomaticTransmission() {
+    return normalizeTransmissionPreference(this.config.transmission) === "automatic";
+  }
+
+  filterOffersForConfiguredTransmission(offers) {
+    return filterOffersByTransmissionPreference(offers, this.config.transmission);
+  }
+
+  async applyAutomaticTransmissionFilter(page) {
+    const clicked = await page.evaluate(() => {
+      const normalize = (value) => String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+      const isAutomatic = (value) => /automatyczna|automatic|automat\b/i.test(value);
+      const isManual = (value) => /manualna|manual\b|reczna|r\u0119czna/i.test(value);
+      const isTransmissionGroup = (value) => /skrzyn|transmission|gearbox|gear/.test(normalize(value));
+      const isFilterContext = (element) => {
+        const wrapper = element.closest("[class*='filter' i], [id*='filter' i], .SearchFiltersGroup, .SearchFiltersGroup-FilterWrapper");
+        if (!wrapper) {
+          return false;
+        }
+        const text = normalize(wrapper.textContent || "");
+        return isTransmissionGroup(text) || isAutomatic(text);
+      };
+      const escapeCssIdentifier = (value) => {
+        if (window.CSS?.escape) {
+          return window.CSS.escape(value);
+        }
+        return String(value).replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+      };
+      const labelTextForInput = (input) => {
+        const id = input.getAttribute("id");
+        const label = id ? document.querySelector(`label[for="${escapeCssIdentifier(id)}"]`) : null;
+        const closestLabel = input.closest("label");
+        const wrapper = input.closest("[class*='filter' i], [id*='filter' i], .SearchFiltersGroup-FilterWrapper");
+        return [
+          label?.textContent,
+          closestLabel?.textContent,
+          wrapper?.textContent,
+          input.getAttribute("aria-label"),
+          input.getAttribute("name"),
+          input.value
+        ].filter(Boolean).join(" ");
+      };
+
+      const clickElement = (element) => {
+        if (!element) {
+          return false;
+        }
+        element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+        element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+        element.click();
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      };
+
+      const inputs = Array.from(document.querySelectorAll("input[type='checkbox'], input[type='radio']"));
+      for (const input of inputs) {
+        const text = labelTextForInput(input);
+        if (!isAutomatic(text) || isManual(text) || !isFilterContext(input)) {
+          continue;
+        }
+        if (input.checked) {
+          return true;
+        }
+        return clickElement(input);
+      }
+
+      const controls = Array.from(document.querySelectorAll(
+        ".SearchFiltersGroup-FilterWrapper, [class*='filter' i] label, [class*='filter' i] button, [class*='filter' i] [role='checkbox'], [class*='filter' i] [role='radio']"
+      ));
+      for (const control of controls) {
+        const text = control.textContent || control.getAttribute("aria-label") || "";
+        if (!isAutomatic(text) || isManual(text) || !isFilterContext(control)) {
+          continue;
+        }
+        const selected = control.getAttribute("aria-checked") === "true"
+          || /\b(active|selected|checked)\b/i.test(String(control.className || ""));
+        if (selected) {
+          return true;
+        }
+        const input = control.querySelector?.("input[type='checkbox'], input[type='radio']");
+        return clickElement(input || control);
+      }
+
+      return false;
+    }).catch(() => false);
+
+    if (!clicked) {
+      return false;
+    }
+
+    await page.waitForLoadState("domcontentloaded", { timeout: Math.min(this.config.timeoutMs, 10000) }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: this.collectorWaitTimeoutMs() + 3000 }).catch(() => {});
+    await this.waitForLoadingScreenToFinish(page);
+    await page.waitForTimeout(this.isFastMode() ? 800 : 1500);
+    return true;
   }
 
   async ensureConfiguredSearchPeriod(page) {
@@ -1495,6 +1614,23 @@ class RentCarsScraper {
         target.location
       ])
     );
+    const transmission = firstTransmission([
+      candidate.transmission,
+      candidate.transmissionType,
+      candidate.gearbox,
+      candidate.gearboxType,
+      candidate.gearBox,
+      candidate.carTransmission,
+      candidate.vehicleTransmission,
+      candidate.car?.transmission,
+      candidate.car?.gearbox,
+      candidate.vehicle?.transmission,
+      candidate.vehicle?.gearbox,
+      candidate.model?.transmission,
+      candidate.features,
+      candidate.car?.features,
+      candidate.vehicle?.features
+    ]);
 
     return {
       provider,
@@ -1508,6 +1644,7 @@ class RentCarsScraper {
       sortOrder: target.sortOrder,
       sortLabel: target.sortLabel,
       priceMode: target.priceMode,
+      transmission,
       source
     };
   }
@@ -1552,7 +1689,13 @@ class RentCarsScraper {
         return lines.find((line) => /(rating|score|excellent|very good|good)/i.test(line) && parseRating(line) != null) || "";
       };
 
-      const addCandidate = (providerText, priceText, ratingText = "") => {
+      const findTransmissionText = (root) => {
+        const text = normalize(root?.innerText || root?.textContent || "");
+        const lines = text.split(/\n+/).map(normalize).filter(Boolean);
+        return lines.find((line) => /automatyczna|automatic|automat\b|manualna|manual\b|r(?:e|\u0119)czna/i.test(line)) || "";
+      };
+
+      const addCandidate = (providerText, priceText, ratingText = "", transmissionText = "") => {
         const provider = normalize(providerText);
         const price = normalize(priceText);
         const providerRating = parseRating(ratingText);
@@ -1568,7 +1711,8 @@ class RentCarsScraper {
           requestedLocation: targetData.requestedLocation,
           sortOrder: targetData.sortOrder,
           sortLabel: targetData.sortLabel,
-          priceMode: targetData.priceMode
+          priceMode: targetData.priceMode,
+          transmissionText: normalize(transmissionText)
         });
       };
 
@@ -1602,6 +1746,7 @@ class RentCarsScraper {
           .replace(/^wypozyczalnia\s+/i, "")
           .replace(/^wypożyczalnia\s+/i, "");
         const ratingText = item.querySelector(".rating-details")?.textContent || "";
+        const transmissionText = findTransmissionText(item);
 
         if (!provider || !priceText) {
           return;
@@ -1618,6 +1763,7 @@ class RentCarsScraper {
           sortOrder: targetData.sortOrder,
           sortLabel: targetData.sortLabel,
           priceMode: targetData.priceMode,
+          transmissionText,
           offerRank: index
         });
       };
@@ -1631,7 +1777,7 @@ class RentCarsScraper {
       for (const row of supplierFilterRows) {
         const provider = row.querySelector(".SearchFiltersGroup-FilterLabel")?.textContent || "";
         const price = row.querySelector(".SearchFiltersGroup-FilterMinPrice")?.textContent || "";
-        addCandidate(provider, price, findRatingText(row));
+        addCandidate(provider, price, findRatingText(row), findTransmissionText(row));
       }
 
       if (results.length < 3) {
@@ -1668,7 +1814,7 @@ class RentCarsScraper {
           continue;
         }
 
-          addCandidate(providerLine, priceLine, findRatingText(node));
+          addCandidate(providerLine, priceLine, findRatingText(node), findTransmissionText(node));
         }
       }
 
@@ -1701,6 +1847,7 @@ class RentCarsScraper {
         sortOrder: candidate.sortOrder || target.sortOrder,
         sortLabel: candidate.sortLabel || target.sortLabel,
         priceMode: candidate.priceMode || target.priceMode,
+        transmission: normalizeTransmission(candidate.transmissionText),
         offerRank: Number.isFinite(candidate.offerRank) ? candidate.offerRank : null,
         source: "dom"
       });
@@ -1730,6 +1877,69 @@ function firstDefinedString(values) {
     }
   }
   return "";
+}
+
+function normalizeTransmissionPreference(value) {
+  const normalized = normalizeWhitespace(value || "automatic").toLowerCase().replace(/[_-]+/g, " ");
+  if (["any", "all", "dowolna"].includes(normalized)) {
+    return "any";
+  }
+  if (["manual", "manualna"].includes(normalized)) {
+    return "manual";
+  }
+  return "automatic";
+}
+
+function normalizeTransmission(value) {
+  if (value == null) {
+    return "";
+  }
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === "object"
+      ? Object.values(value)
+      : [value];
+  const text = normalizeWhitespace(values.map((item) => {
+    if (item == null) {
+      return "";
+    }
+    return typeof item === "object" ? JSON.stringify(item) : String(item);
+  }).join(" "));
+  if (!text) {
+    return "";
+  }
+  if (AUTOMATIC_TRANSMISSION_PATTERN.test(text)) {
+    return "automatic";
+  }
+  if (MANUAL_TRANSMISSION_PATTERN.test(text)) {
+    return "manual";
+  }
+  return "";
+}
+
+function firstTransmission(values) {
+  for (const value of values) {
+    const transmission = normalizeTransmission(value);
+    if (transmission) {
+      return transmission;
+    }
+  }
+  return "";
+}
+
+function filterOffersByTransmissionPreference(offers, rawPreference) {
+  const preference = normalizeTransmissionPreference(rawPreference);
+  if (preference === "any") {
+    return Array.isArray(offers) ? offers : [];
+  }
+
+  const rows = Array.isArray(offers) ? offers : [];
+  const withoutOpposite = rows.filter((offer) => {
+    const transmission = normalizeTransmission(offer?.transmission);
+    return transmission !== (preference === "automatic" ? "manual" : "automatic");
+  });
+  const exactMatches = withoutOpposite.filter((offer) => normalizeTransmission(offer?.transmission) === preference);
+  return exactMatches.length ? exactMatches : withoutOpposite;
 }
 
 function normalizeRatingValue(value) {
@@ -1870,7 +2080,8 @@ function dedupeOffers(offers) {
       offer.totalPrice,
       normalizeWhitespace(offer.location).toLowerCase(),
       normalizeWhitespace(offer.sortOrder).toLowerCase(),
-      normalizeWhitespace(offer.priceMode).toLowerCase()
+      normalizeWhitespace(offer.priceMode).toLowerCase(),
+      normalizeTransmission(offer.transmission)
     ].join("|");
     if (seen.has(key)) {
       continue;
@@ -1887,6 +2098,7 @@ function dedupeOffers(offers) {
       sortOrder: normalizeWhitespace(offer.sortOrder),
       sortLabel: normalizeWhitespace(offer.sortLabel),
       priceMode: normalizeWhitespace(offer.priceMode),
+      transmission: normalizeTransmission(offer.transmission),
       offerRank: Number.isFinite(offer.offerRank) ? Number(offer.offerRank) : null
     });
   }
@@ -1929,6 +2141,7 @@ function selectBestOffersByProvider(offers, targetInput, maxProviders, forcedPro
       sortOrder: normalizeWhitespace(offer.sortOrder || target.sortOrder),
       sortLabel: normalizeWhitespace(offer.sortLabel || target.sortLabel),
       priceMode: normalizeWhitespace(offer.priceMode || target.priceMode),
+      transmission: normalizeTransmission(offer.transmission),
       offerRank: Number.isFinite(offer.offerRank) ? Number(offer.offerRank) : null,
       source: normalizeWhitespace(offer.source)
     };
@@ -2288,5 +2501,6 @@ function normalizeCountryCode(value) {
 
 module.exports = {
   RentCarsScraper,
+  filterOffersByTransmissionPreference,
   findRentCarsLocationMatches
 };

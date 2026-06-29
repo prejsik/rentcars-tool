@@ -218,6 +218,28 @@ function parseSortOrdersInput(rawValue, fieldName) {
   return [...new Set(values)];
 }
 
+function parseTransmissionInput(rawValue, fieldName) {
+  const normalized = normalizeWhitespace(rawValue ?? "automatic")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ");
+  const aliases = new Map([
+    ["any", "any"],
+    ["all", "any"],
+    ["dowolna", "any"],
+    ["automatic", "automatic"],
+    ["auto", "automatic"],
+    ["automat", "automatic"],
+    ["automatyczna", "automatic"],
+    ["manual", "manual"],
+    ["manualna", "manual"]
+  ]);
+  const value = aliases.get(normalized);
+  if (!value) {
+    throw new Error(`${fieldName} contains unsupported transmission: ${rawValue}`);
+  }
+  return value;
+}
+
 function normalizeDayToken(rawValue) {
   return String(rawValue ?? "")
     .trim()
@@ -471,6 +493,10 @@ function loadConfig(argv) {
       configValue(cli, fileConfig, ["locationConcurrency", "location-concurrency"]),
       "locationConcurrency"
     ) || 1,
+    transmission: parseTransmissionInput(
+      configValue(cli, fileConfig, ["transmission", "gearbox", "gearbox-type"], "automatic"),
+      "transmission"
+    ),
     headless: configValue(cli, fileConfig, ["headless"], true) !== false,
     browserExecutablePath: normalizeWhitespace(
       configValue(cli, fileConfig, ["browserExecutablePath", "browser-executable-path"], "")
@@ -511,6 +537,7 @@ Options:
   --durations-days "2,3,4"    Multiple rental lengths in days
   --duration-days NUMBER       Repeatable shortcut
   --sort-orders "suggested,price,price_insurance"
+  --transmission "automatic|manual|any"
   --max-providers-per-location NUMBER
   --max-additional-result-pages NUMBER
   --location-concurrency NUMBER

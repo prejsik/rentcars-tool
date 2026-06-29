@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 
 const { loadConfig } = require("../src/rentcars/config");
 const { parseMoney, toCsv } = require("../src/rentcars/utils");
-const { RentCarsScraper, findRentCarsLocationMatches } = require("../src/rentcars/scraper");
+const { RentCarsScraper, filterOffersByTransmissionPreference, findRentCarsLocationMatches } = require("../src/rentcars/scraper");
 const { buildHtmlReport } = require("../src/rentcars/reportHtml");
 const { buildRootPayload } = require("../src/rentcars/run");
 const { mergePayloads } = require("../src/rentcars/mergeResults");
@@ -42,6 +42,7 @@ runTest("loadConfig uses RentCars defaults and output folders", () => {
   assert.equal(config.baseUrl, "https://rentcars.pl");
   assert.deepEqual(config.locations, ["Warszawa"]);
   assert.deepEqual(config.sortOrders, ["price_insurance"]);
+  assert.equal(config.transmission, "automatic");
   assert.equal(config.maxAdditionalResultPages, 1);
   assert.match(config.outputCsv, /rentcars-results-/);
   assert.match(config.artifactsDir, /artifacts[\\/]rentcars$/);
@@ -123,6 +124,16 @@ runTest("CLI max additional result pages overrides config", () => {
   assert.equal(config.maxAdditionalResultPages, 2);
 });
 
+runTest("CLI transmission can override default automatic filtering", () => {
+  const config = loadConfig([
+    "--config=rentcars.config.example.json",
+    "--locations=Warszawa",
+    "--transmission=any"
+  ]);
+
+  assert.equal(config.transmission, "any");
+});
+
 runTest("toCsv writes RentCars pickup and sort metadata", () => {
   const csv = toCsv([
     {
@@ -146,6 +157,26 @@ runTest("toCsv writes RentCars pickup and sort metadata", () => {
 
 runTest("scraper module exports RentCarsScraper", () => {
   assert.equal(typeof RentCarsScraper, "function");
+});
+
+runTest("automatic transmission filtering drops known manual offers", () => {
+  const offers = filterOffersByTransmissionPreference([
+    { provider: "A", totalPrice: 100, transmission: "manual" },
+    { provider: "B", totalPrice: 110, transmission: "automatic" },
+    { provider: "C", totalPrice: 120, transmission: "" }
+  ], "automatic");
+
+  assert.deepEqual(offers.map((offer) => offer.provider), ["B"]);
+});
+
+runTest("automatic transmission filtering keeps unknown offers when no automatic metadata exists", () => {
+  const offers = filterOffersByTransmissionPreference([
+    { provider: "A", totalPrice: 100, transmission: "manual" },
+    { provider: "B", totalPrice: 110, transmission: "" },
+    { provider: "C", totalPrice: 120 }
+  ], "automatic");
+
+  assert.deepEqual(offers.map((offer) => offer.provider), ["B", "C"]);
 });
 
 runTest("city location expansion keeps only RentCars airport pickup points", () => {

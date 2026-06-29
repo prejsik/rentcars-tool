@@ -14,6 +14,7 @@
   "rollingDays": 30,
   "durationsDays": [2],
   "sortOrders": ["price_insurance"],
+  "transmission": "automatic",
   "residenceCountry": "Poland",
   "driverAge": 30,
   "headless": true,

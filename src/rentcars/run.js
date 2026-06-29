@@ -97,6 +97,17 @@ function normalizeProviderName(value) {
   return name;
 }
 
+function normalizeTransmissionName(value) {
+  const raw = normalizeWhitespace(value).toLowerCase();
+  if (raw === "automatic" || /automatyczna|automatic|automat\b/i.test(raw)) {
+    return "automatic";
+  }
+  if (raw === "manual" || /manualna|manual\b|r\u0119czna|reczna/i.test(raw)) {
+    return "manual";
+  }
+  return raw;
+}
+
 function mapOffer(row, scenario) {
   const pickupLocation = row.pickupLocation || row.location;
   const totalPrice = Number(row.totalPrice);
@@ -108,6 +119,7 @@ function mapOffer(row, scenario) {
     sort_order: row.sortOrder || "suggested",
     sort_label: row.sortLabel || "sugerowane",
     price_mode: row.priceMode || "base",
+    transmission: normalizeTransmissionName(row.transmission),
     provider_name: normalizeProviderName(row.provider),
     provider_rating: Number.isFinite(row.providerRating) ? row.providerRating : null,
     total_price: totalPrice,
