@@ -34,6 +34,10 @@ on:
         description: "Scraper speed mode: safe, fast, or turbo"
         required: true
         default: "fast"
+      sort_orders:
+        description: "Comma-separated RentCars.pl sort modes"
+        required: true
+        default: "price_insurance"
       location_concurrency:
         description: "Parallel RentCars.pl pickup locations per scenario"
         required: true
@@ -49,12 +53,14 @@ env:
   SCHEDULE_ROLLING_DAYS: "30"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10"
   SCHEDULE_SPEED_MODE: "fast"
+  SCHEDULE_SORT_ORDERS: "price_insurance"
   SCHEDULE_LOCATION_CONCURRENCY: "6"
   SCHEDULE_CHUNK_SCRAPER_TIMEOUT: "90m"
   PUSH_TEST_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
   PUSH_TEST_ROLLING_DAYS: "1"
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_SPEED_MODE: "fast"
+  PUSH_TEST_SORT_ORDERS: "price_insurance"
   PUSH_TEST_LOCATION_CONCURRENCY: "2"
   PUSH_TEST_CHUNK_SCRAPER_TIMEOUT: "45m"
 
@@ -68,6 +74,7 @@ jobs:
       rolling_days: ${{ steps.options.outputs.rolling_days }}
       durations: ${{ steps.options.outputs.durations }}
       speed_mode: ${{ steps.options.outputs.speed_mode }}
+      sort_orders: ${{ steps.options.outputs.sort_orders }}
       location_concurrency: ${{ steps.options.outputs.location_concurrency }}
       chunk_timeout: ${{ steps.options.outputs.chunk_timeout }}
       expected_scenario_count: ${{ steps.options.outputs.expected_scenario_count }}
@@ -117,6 +124,7 @@ jobs:
           INPUT_ROLLING_DAYS: ${{ inputs.rolling_days }}
           INPUT_DURATIONS: ${{ inputs.durations }}
           INPUT_SPEED_MODE: ${{ inputs.speed_mode }}
+          INPUT_SORT_ORDERS: ${{ inputs.sort_orders }}
           INPUT_LOCATION_CONCURRENCY: ${{ inputs.location_concurrency }}
         run: |
           if [[ "${{ steps.gate.outputs.should_run }}" != "true" ]]; then
@@ -125,6 +133,7 @@ jobs:
             echo "rolling_days=0" >> "$GITHUB_OUTPUT"
             echo "durations=" >> "$GITHUB_OUTPUT"
             echo "speed_mode=fast" >> "$GITHUB_OUTPUT"
+            echo "sort_orders=price_insurance" >> "$GITHUB_OUTPUT"
             echo "location_concurrency=1" >> "$GITHUB_OUTPUT"
             echo "chunk_timeout=1m" >> "$GITHUB_OUTPUT"
             echo "expected_scenario_count=0" >> "$GITHUB_OUTPUT"
@@ -137,6 +146,7 @@ jobs:
             default_rolling_days="$PUSH_TEST_ROLLING_DAYS"
             default_durations="$PUSH_TEST_DURATIONS"
             default_speed_mode="$PUSH_TEST_SPEED_MODE"
+            default_sort_orders="$PUSH_TEST_SORT_ORDERS"
             default_location_concurrency="$PUSH_TEST_LOCATION_CONCURRENCY"
             chunk_timeout="$PUSH_TEST_CHUNK_SCRAPER_TIMEOUT"
           else
@@ -144,6 +154,7 @@ jobs:
             default_rolling_days="$SCHEDULE_ROLLING_DAYS"
             default_durations="$SCHEDULE_DURATIONS"
             default_speed_mode="$SCHEDULE_SPEED_MODE"
+            default_sort_orders="$SCHEDULE_SORT_ORDERS"
             default_location_concurrency="$SCHEDULE_LOCATION_CONCURRENCY"
             chunk_timeout="$SCHEDULE_CHUNK_SCRAPER_TIMEOUT"
           fi
@@ -152,6 +163,7 @@ jobs:
           rolling_days="${INPUT_ROLLING_DAYS:-$default_rolling_days}"
           durations="${INPUT_DURATIONS:-$default_durations}"
           speed_mode="${INPUT_SPEED_MODE:-$default_speed_mode}"
+          sort_orders="${INPUT_SORT_ORDERS:-$default_sort_orders}"
           location_concurrency="${INPUT_LOCATION_CONCURRENCY:-$default_location_concurrency}"
 
           if ! [[ "$rolling_days" =~ ^[0-9]+$ ]] || [[ "$rolling_days" -lt 1 ]]; then
@@ -187,6 +199,7 @@ jobs:
           echo "rolling_days=$rolling_days" >> "$GITHUB_OUTPUT"
           echo "durations=$durations" >> "$GITHUB_OUTPUT"
           echo "speed_mode=$speed_mode" >> "$GITHUB_OUTPUT"
+          echo "sort_orders=$sort_orders" >> "$GITHUB_OUTPUT"
           echo "location_concurrency=$location_concurrency" >> "$GITHUB_OUTPUT"
           echo "chunk_timeout=$chunk_timeout" >> "$GITHUB_OUTPUT"
           echo "expected_scenario_count=$expected_scenario_count" >> "$GITHUB_OUTPUT"
@@ -196,6 +209,7 @@ jobs:
           echo "Locations: $locations"
           echo "Rolling days: $rolling_days"
           echo "Durations: $durations"
+          echo "Sort orders: $sort_orders"
           echo "Expected scenarios: $expected_scenario_count"
           echo "Speed mode: $speed_mode"
           echo "Location concurrency: $location_concurrency"
@@ -247,7 +261,7 @@ jobs:
             --locations="${{ needs.plan.outputs.locations }}" \
             --start-dates="${{ matrix.start_date }}" \
             --durations-days="${{ needs.plan.outputs.durations }}" \
-            --sort-orders=price_insurance \
+            --sort-orders="${{ needs.plan.outputs.sort_orders }}" \
             --speed-mode="${{ needs.plan.outputs.speed_mode }}" \
             --location-concurrency="${{ needs.plan.outputs.location_concurrency }}" \
             --timeout-ms=30000 \
@@ -321,7 +335,7 @@ jobs:
             --started-at="${{ needs.plan.outputs.run_started_at }}" \
             --base-url=https://rentcars.pl \
             --locations="${{ needs.plan.outputs.locations }}" \
-            --sort-orders=price_insurance
+            --sort-orders="${{ needs.plan.outputs.sort_orders }}"
 
       - name: Generate RentCars.pl HTML report
         id: report
