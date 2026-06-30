@@ -32,8 +32,8 @@ Interactive local launcher:
 .\start-rentcars.bat
 ```
 
-It opens a Windows options window similar to the DiscoverCars launcher. The default city set matches DiscoverCars:
-`Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan`.
+It opens a Windows options window similar to the DiscoverCars launcher. The default city set includes DiscoverCars cities plus Bydgoszcz and Lodz:
+`Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz`.
 
 Save the GitHub-style JSON payload:
 
@@ -77,7 +77,7 @@ During long scheduled runs, every date chunk writes JSON snapshots after each co
 The scheduled GitHub profile is:
 
 - around `01:17 Europe/Warsaw`
-- all DiscoverCars cities mapped to RentCars.pl airport pickup points: `Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan`
+- all DiscoverCars cities plus Bydgoszcz and Lodz mapped to RentCars.pl airport pickup points: `Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz`
 - `rolling_days: 30`
 - `durations: 2,3,4,5,6,7,8,9,10`
 - `sort_orders: price_insurance`
@@ -117,6 +117,7 @@ node .\src\rentcars\cli.js --config .\rentcars.config.example.json --headed
 
 - RentCars.pl uses a different Polish UI and search flow than DiscoverCars, so this module is intentionally separate under `src/rentcars`.
 - A city such as `Warszawa` is expanded only to airport pickup options, for example `Warszawa, Lotnisko-Modlin` and `Warszawa, Lotnisko-Okecie`.
+- Added airport-only cities include `Bydgoszcz, Lotnisko-Szwederowo` and `Lodz` mapped to `Łódź, Lotnisko-Lublinek`.
 - The scheduled GitHub Actions workflow is separate too: `.github/workflows/rentcars-daily.yml`.
 - GitHub runs that workflow in the cloud, so the local laptop does not need to be turned on.
 - The RentCars.pl workflow uploads `rentcars-results-latest.json`, `rentcars-report.html`, `rentcars-run-log.txt`, `rentcars-run-error.txt`, and failure artifacts.

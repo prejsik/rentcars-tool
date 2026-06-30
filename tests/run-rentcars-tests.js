@@ -185,7 +185,11 @@ runTest("city location expansion keeps only RentCars airport pickup points", () 
     { value: "2", label: "Warszawa, Lotnisko-Modlin" },
     { value: "3", label: "Warszawa, Lotnisko-Ok\u0119cie" },
     { value: "4", label: "Krak\u00f3w, Centrum" },
-    { value: "5", label: "Krak\u00f3w, Lotnisko-Balice" }
+    { value: "5", label: "Krak\u00f3w, Lotnisko-Balice" },
+    { value: "6", label: "Bydgoszcz, Centrum" },
+    { value: "7", label: "Bydgoszcz, Lotnisko-Szwederowo" },
+    { value: "8", label: "\u0141\u00f3d\u017a, Centrum" },
+    { value: "9", label: "\u0141\u00f3d\u017a, Lotnisko-Lublinek" }
   ];
 
   assert.deepEqual(
@@ -195,6 +199,14 @@ runTest("city location expansion keeps only RentCars airport pickup points", () 
   assert.deepEqual(
     findRentCarsLocationMatches("Krakow", options).map((option) => option.label),
     ["Krak\u00f3w, Lotnisko-Balice"]
+  );
+  assert.deepEqual(
+    findRentCarsLocationMatches("Bydgoszcz", options).map((option) => option.label),
+    ["Bydgoszcz, Lotnisko-Szwederowo"]
+  );
+  assert.deepEqual(
+    findRentCarsLocationMatches("Lodz", options).map((option) => option.label),
+    ["\u0141\u00f3d\u017a, Lotnisko-Lublinek"]
   );
   assert.deepEqual(
     findRentCarsLocationMatches("Warszawa, Centrum", options).map((option) => option.label),

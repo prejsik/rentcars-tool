@@ -21,7 +21,7 @@ on:
       locations:
         description: "Comma-separated RentCars.pl locations"
         required: true
-        default: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+        default: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
       rolling_days:
         description: "How many pickup start dates from tomorrow"
         required: true
@@ -45,13 +45,13 @@ permissions:
   id-token: write
 
 env:
-  SCHEDULE_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+  SCHEDULE_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
   SCHEDULE_ROLLING_DAYS: "30"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10"
   SCHEDULE_SPEED_MODE: "fast"
   SCHEDULE_LOCATION_CONCURRENCY: "6"
   SCHEDULE_CHUNK_SCRAPER_TIMEOUT: "90m"
-  PUSH_TEST_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+  PUSH_TEST_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
   PUSH_TEST_ROLLING_DAYS: "1"
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_SPEED_MODE: "fast"

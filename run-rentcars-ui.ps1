@@ -125,7 +125,7 @@ function Show-RunPicker {
   $locationsLabel.Top = 340
   $locationsLabel.Width = 500
   $locationsLabel.Height = 34
-  $locationsLabel.Text = "Cities checked by default match DiscoverCars:`nWarszawa, Krakow, Gdansk, Katowice, Wroclaw, Poznan."
+  $locationsLabel.Text = "Cities checked by default match DiscoverCars plus added airports:`nWarszawa, Krakow, Gdansk, Katowice, Wroclaw, Poznan, Bydgoszcz, Lodz."
   $form.Controls.Add($locationsLabel)
 
   $startDatesLabel = New-Object System.Windows.Forms.Label
@@ -608,7 +608,7 @@ try {
   $stdoutLog = Join-Path $outputDir "rentcars-run-log.txt"
   $stderrLog = Join-Path $outputDir "rentcars-run-error.txt"
 
-  $locationsCsv = "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+  $locationsCsv = "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
   $configPath = Join-Path $root "rentcars.config.example.json"
 
   $nodeArgs = @(

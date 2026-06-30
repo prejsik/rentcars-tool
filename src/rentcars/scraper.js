@@ -2308,7 +2308,9 @@ const AIRPORT_LOCATION_FALLBACKS = {
   gdansk: ["Gda\u0144sk, Lotnisko-R\u0119biechowo"],
   katowice: ["Katowice, Lotnisko-Pyrzowice"],
   wroclaw: ["Wroc\u0142aw, Lotnisko-Strachowice"],
-  poznan: ["Pozna\u0144, Lotnisko-\u0141awica"]
+  poznan: ["Pozna\u0144, Lotnisko-\u0141awica"],
+  bydgoszcz: ["Bydgoszcz, Lotnisko-Szwederowo"],
+  lodz: ["\u0141\u00f3d\u017a, Lotnisko-Lublinek"]
 };
 
 function isRentCarsAirportOption(option) {
@@ -2322,6 +2324,8 @@ function isRentCarsAirportOption(option) {
     "pyrzowice",
     "strachowice",
     "lawica",
+    "szwederowo",
+    "lublinek",
     "okecie",
     "modlin"
   ].some((token) => label.includes(token));

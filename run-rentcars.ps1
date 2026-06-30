@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 
-$DefaultLocations = "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+$DefaultLocations = "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
 $DefaultDurations = "2"
 $ConfigPath = Join-Path $Root "rentcars.config.example.json"
 $OutputJson = Join-Path $Root "output\rentcars-results-latest.json"
@@ -11,7 +11,7 @@ $OutputHtml = Join-Path $Root "output\rentcars-report.html"
 
 Write-Host "RentCars.pl local runner"
 Write-Host ""
-Write-Host "Default cities match DiscoverCars: $DefaultLocations"
+Write-Host "Default cities include DiscoverCars cities plus Bydgoszcz and Lodz: $DefaultLocations"
 Write-Host ""
 
 $Locations = Read-Host "Cities/locations comma-separated (Enter = all default cities)"
