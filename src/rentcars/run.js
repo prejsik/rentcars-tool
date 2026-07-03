@@ -377,9 +377,11 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().catch((error) => {
+  main().then(() => {
+    process.exit(process.exitCode || 0);
+  }).catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
+    process.exit(1);
   });
 }
 

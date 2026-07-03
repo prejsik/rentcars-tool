@@ -55,6 +55,26 @@ function normalizeSpeedMode(value) {
   return "safe";
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldRetryLocationOutcome(outcome) {
+  return /No offers could be extracted|No valid offers/i.test(String(outcome?.error?.message || ""));
+}
+
+function isBlockedThirdPartyResource(url) {
+  return /(?:popupsmart|smartsupp|googletagmanager|google-analytics|googleadservices|doubleclick|facebook|tiktok)\./i
+    .test(String(url || ""));
+}
+
+async function closeBrowserWithTimeout(browser, timeoutMs = 5000) {
+  await Promise.race([
+    browser.close(),
+    delay(timeoutMs)
+  ]).catch(() => {});
+}
+
 class RentCarsScraper {
   constructor(config) {
     this.config = config;
@@ -99,7 +119,13 @@ class RentCarsScraper {
           }
 
           const target = searchTargets[currentIndex];
-          outcomes[currentIndex] = await this.runSingleLocation(browser, target);
+          let outcome = await this.runSingleLocation(browser, target);
+          if (!outcome.ok && shouldRetryLocationOutcome(outcome)) {
+            console.log(`RETRY ${formatSearchTarget(target)} -> ${outcome.error.message}`);
+            await delay(1500);
+            outcome = await this.runSingleLocation(browser, target);
+          }
+          outcomes[currentIndex] = outcome;
         }
       });
 
@@ -127,7 +153,7 @@ class RentCarsScraper {
         console.log(`ERR ${targetLabel} -> ${outcome.error.message}`);
       }
     } finally {
-      await browser.close();
+      await closeBrowserWithTimeout(browser);
     }
 
     return { results, failures };
@@ -157,6 +183,11 @@ class RentCarsScraper {
     const fallbackTargets = makeAirportOnlyFallbackTargets(requestedLocations);
     if (!/rentcars\.pl/i.test(this.config.baseUrl)) {
       return fallbackTargets;
+    }
+
+    const staticAirportTargets = makeStaticAirportLocationTargets(requestedLocations);
+    if (staticAirportTargets.length) {
+      return staticAirportTargets;
     }
 
     const context = await browser.newContext({
@@ -232,6 +263,7 @@ class RentCarsScraper {
       if (!this.isFastMode()) {
         await page.goto(this.config.baseUrl, { waitUntil: "domcontentloaded" });
         await this.acceptCookies(page);
+        await this.dismissObstructiveOverlays(page);
         homepagePrepared = true;
       }
 
@@ -241,6 +273,7 @@ class RentCarsScraper {
         if (!homepagePrepared) {
           await page.goto(this.config.baseUrl, { waitUntil: "domcontentloaded" });
           await this.acceptCookies(page);
+          await this.dismissObstructiveOverlays(page);
           homepagePrepared = true;
         }
 
@@ -309,7 +342,7 @@ class RentCarsScraper {
       return 1000;
     }
     if (speedMode === "fast") {
-      return 3000;
+      return 5000;
     }
     return 8000;
   }
@@ -333,6 +366,10 @@ class RentCarsScraper {
 
     await context.route("**/*", async (route) => {
       const resourceType = route.request().resourceType();
+      if (isBlockedThirdPartyResource(route.request().url())) {
+        await route.abort().catch(() => {});
+        return;
+      }
       if (resourceType === "image" || resourceType === "font" || resourceType === "media") {
         await route.abort().catch(() => {});
         return;
@@ -343,7 +380,37 @@ class RentCarsScraper {
   }
 
   async tryDirectSearchFlow(page, location, collector) {
-    return [];
+    const target = makeLocationTarget(location);
+    if (!/rentcars\.pl/i.test(this.config.baseUrl) || !target.value) {
+      return [];
+    }
+
+    const origin = new URL(this.config.baseUrl).origin;
+    const searchUrl = this.buildDirectSearchUrl(origin, target.value);
+    const loaded = await page
+      .goto(searchUrl, { waitUntil: "domcontentloaded", timeout: this.config.timeoutMs })
+      .then(() => true)
+      .catch(() => false);
+
+    if (!loaded || !(await this.looksLikeSearchPage(page))) {
+      return [];
+    }
+
+    await this.waitForResults(page);
+    if (this.prefersAutomaticTransmission()) {
+      collector.clear();
+      if (await this.applyAutomaticTransmissionFilter(page)) {
+        console.log(`FLT ${formatSearchTarget(target)} -> automatic transmission`);
+      }
+    }
+    await this.waitForCollectorOffers(collector, this.collectorWaitTimeoutMs());
+
+    const pageOffers = await this.collectOffersFromCurrentPage(page, target);
+    await this.loadAdditionalResultPages(page, target, collector, pageOffers);
+    return dedupeOffers([
+      ...collector.getOffers(),
+      ...pageOffers
+    ]);
   }
 
   async resolveLocationCandidates(page, location) {
@@ -512,6 +579,7 @@ class RentCarsScraper {
   }
 
   async fillSearchForm(page, locationInput) {
+    await this.dismissObstructiveOverlays(page);
     const target = makeLocationTarget(locationInput);
     if (await this.fillRentCarsForm(page, target)) {
       return;
@@ -706,9 +774,9 @@ class RentCarsScraper {
       page.getByLabel(/pick-up location/i).first(),
       page.locator("input[placeholder*='Punkt']").first(),
       page.locator("input[placeholder*='Pick-up']").first(),
-      page.locator("input[name*='pickup' i], input[name*='odbior' i], input[name*='from' i]").first(),
-      page.locator("input[name*='pick']").first(),
-      page.locator("input:not([type='hidden']):not([type='submit']):not([type='button'])").first()
+      page.locator("input:not([readonly])[name*='pickup' i]:not([name*='date' i]), input:not([readonly])[name*='odbior' i], input:not([readonly])[name*='from' i]").first(),
+      page.locator("input:not([readonly])[name*='pick' i]:not([name*='date' i])").first(),
+      page.locator("input:not([readonly]):not([type='hidden']):not([type='submit']):not([type='button']):not([id*='date' i]):not([name*='date' i])").first()
     ];
 
     let input = null;
@@ -1091,6 +1159,7 @@ class RentCarsScraper {
 
   async submitSearch(page) {
     await this.acceptCookies(page);
+    await this.dismissObstructiveOverlays(page);
 
     const directButtons = [
       page.locator("#elementsubmit").first(),
@@ -1105,7 +1174,12 @@ class RentCarsScraper {
           button.click({ timeout: 4000, force: true })
         ]);
         await page.waitForTimeout(1200);
-        return;
+        if (await this.looksLikeSearchPage(page)) {
+          return;
+        }
+        if (await this.hasPickupLocationValidationError(page)) {
+          throw new Error("Pick-up location was not accepted by RentCars.pl.");
+        }
       }
     }
 
@@ -1144,7 +1218,7 @@ class RentCarsScraper {
     await page.waitForLoadState("domcontentloaded", { timeout: this.config.timeoutMs }).catch(() => {});
     const speedMode = normalizeSpeedMode(this.config.speedMode);
     const networkIdleTimeoutMs = speedMode === "turbo" ? 2_500 : speedMode === "fast" ? 5_000 : 15_000;
-    const maxAttempts = speedMode === "turbo" ? 8 : speedMode === "fast" ? 12 : 20;
+    const maxAttempts = speedMode === "turbo" ? 10 : speedMode === "fast" ? 20 : 30;
     const visibleSettleMs = speedMode === "turbo" ? 250 : speedMode === "fast" ? 600 : 1500;
     const pollMs = speedMode === "turbo" ? 250 : speedMode === "fast" ? 400 : 750;
     const finalSettleMs = speedMode === "turbo" ? 500 : speedMode === "fast" ? 1000 : 3000;
@@ -1152,23 +1226,27 @@ class RentCarsScraper {
     await page.waitForLoadState("networkidle", { timeout: networkIdleTimeoutMs }).catch(() => {});
     await this.waitForLoadingScreenToFinish(page);
 
+    const realResult = page.locator(".car-search-result-item").first();
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (await realResult.isVisible().catch(() => false)) {
+        await page.waitForTimeout(visibleSettleMs);
+        return;
+      }
+      await page.waitForTimeout(pollMs);
+    }
+
     const signals = [
       page.getByText(/sort by|sortuj/i).first(),
       page.getByText(/free cancellation|bezp(?:l|\u0142)atne anulowanie/i).first(),
       page.getByText(/very good|bardzo dobry|sprawd(?:z|\u017a) cen(?:e|\u0119)/i).first(),
-      page.locator("article").first(),
-      page.locator("[class*='result']").first(),
-      page.locator("[class*='offer']").first()
+      page.locator("article").first()
     ];
 
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      for (const signal of signals) {
-        if (await signal.isVisible().catch(() => false)) {
-          await page.waitForTimeout(visibleSettleMs);
-          return;
-        }
+    for (const signal of signals) {
+      if (await signal.isVisible().catch(() => false)) {
+        await page.waitForTimeout(finalSettleMs);
+        return;
       }
-      await page.waitForTimeout(pollMs);
     }
 
     await page.waitForTimeout(finalSettleMs);
@@ -1425,13 +1503,21 @@ class RentCarsScraper {
     if (/\/search\/[0-9a-f-]{36}/i.test(url) && /[?&]sq=/i.test(url)) {
       return true;
     }
+    if (/\/(?:pl\/)?szukaj\/[a-z0-9]+\.html/i.test(url)) {
+      return true;
+    }
+
+    const resultItem = page.locator(".car-search-result-item").first();
+    if (await resultItem.isVisible().catch(() => false)) {
+      return true;
+    }
 
     const loadingSignal = page.getByText(/searching 1,000\+ car rental brands|wyszukiwanie|szukamy/i).first();
     if (await loadingSignal.isVisible().catch(() => false)) {
       return true;
     }
 
-    const sortBySignal = page.getByText(/sort by|sortuj|sprawd(?:z|\u017a) cen(?:e|\u0119)/i).first();
+    const sortBySignal = page.getByText(/sort by|sortuj|sortowanie|sprawd(?:z|\u017a) cen(?:e|\u0119)/i).first();
     return await sortBySignal.isVisible().catch(() => false);
   }
 
@@ -1868,6 +1954,52 @@ class RentCarsScraper {
       writeTextFile(htmlPath, html);
     }
   }
+
+  async dismissObstructiveOverlays(page) {
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.evaluate(() => {
+      const clickSelectors = [
+        ".rc-simple-react-modal__close",
+        "[aria-label*='close' i]",
+        "[aria-label*='zamknij' i]",
+        "button.close",
+        ".close"
+      ];
+
+      for (const selector of clickSelectors) {
+        for (const element of Array.from(document.querySelectorAll(selector))) {
+          if (element instanceof HTMLElement && element.offsetParent !== null) {
+            element.click();
+          }
+        }
+      }
+
+      const removeSelectors = [
+        "[id^='popupsmart-container']",
+        "[class*='popupsmart' i]",
+        ".rc-simple-react-modal__backdrop"
+      ];
+
+      for (const selector of removeSelectors) {
+        for (const element of Array.from(document.querySelectorAll(selector))) {
+          element.remove();
+        }
+      }
+
+      const promoPattern = /odbierz.*zni(?:z|ż)k|newsletter|promocj/i;
+      for (const element of Array.from(document.body.querySelectorAll("div, section"))) {
+        const style = window.getComputedStyle(element);
+        const zIndex = Number.parseInt(style.zIndex || "0", 10);
+        if ((style.position === "fixed" || style.position === "absolute") && zIndex >= 1000 && promoPattern.test(element.textContent || "")) {
+          element.remove();
+        }
+      }
+
+      document.body.style.overflow = "";
+      document.documentElement.style.overflow = "";
+    }).catch(() => {});
+    await page.waitForTimeout(200);
+  }
 }
 
 function firstDefinedString(values) {
@@ -2071,7 +2203,7 @@ function dedupeOffers(offers) {
 
   for (const offer of offers) {
     const provider = normalizeRentCarsProviderName(offer.provider);
-    if (!provider || !Number.isFinite(offer.totalPrice)) {
+    if (!isUsableRentCarsOffer({ ...offer, provider })) {
       continue;
     }
 
@@ -2106,11 +2238,27 @@ function dedupeOffers(offers) {
   return unique;
 }
 
+function isUsableRentCarsOffer(offer) {
+  const provider = normalizeRentCarsProviderName(offer?.provider);
+  const totalPrice = Number(offer?.totalPrice);
+  if (!provider || !Number.isFinite(totalPrice) || totalPrice <= 0) {
+    return false;
+  }
+
+  const normalizedProvider = normalizeWhitespace(provider).toLowerCase();
+  const promoDailyPricePattern = /\bod\s+\d+(?:[,.]\d{1,2})?\s*z(?:\u0142|l)\s+za\s+dzie(?:\u0144|n)/i;
+  if (promoDailyPricePattern.test(normalizedProvider)) {
+    return false;
+  }
+
+  return totalPrice >= 40;
+}
+
 function countUniqueOfferProviders(offers) {
   const providers = new Set();
   for (const offer of offers) {
     const provider = normalizeRentCarsProviderName(offer.provider).toLowerCase();
-    if (provider && Number.isFinite(offer.totalPrice)) {
+    if (provider && isUsableRentCarsOffer({ ...offer, provider })) {
       providers.add(provider);
     }
   }
@@ -2123,7 +2271,7 @@ function selectBestOffersByProvider(offers, targetInput, maxProviders, forcedPro
 
   for (const offer of offers) {
     const provider = normalizeRentCarsProviderName(offer.provider);
-    if (!provider || !Number.isFinite(offer.totalPrice)) {
+    if (!isUsableRentCarsOffer({ ...offer, provider })) {
       continue;
     }
 
@@ -2299,6 +2447,19 @@ function makeAirportOnlyFallbackTargets(requestedLocations) {
   });
 }
 
+function makeStaticAirportLocationTargets(requestedLocations) {
+  const targets = [];
+  for (const location of requestedLocations) {
+    const requested = normalizeForMatch(location);
+    const staticOptions = STATIC_AIRPORT_LOCATION_TARGETS[requested];
+    if (!staticOptions || requested.includes(",")) {
+      return [];
+    }
+    targets.push(...staticOptions.map((option) => makeLocationTarget(location, option)));
+  }
+  return targets;
+}
+
 const AIRPORT_LOCATION_FALLBACKS = {
   warszawa: [
     "Warszawa, Lotnisko-Modlin",
@@ -2311,6 +2472,20 @@ const AIRPORT_LOCATION_FALLBACKS = {
   poznan: ["Pozna\u0144, Lotnisko-\u0141awica"],
   bydgoszcz: ["Bydgoszcz, Lotnisko-Szwederowo"],
   lodz: ["\u0141\u00f3d\u017a, Lotnisko-Lublinek"]
+};
+
+const STATIC_AIRPORT_LOCATION_TARGETS = {
+  warszawa: [
+    { label: "Warszawa, Lotnisko-Modlin", value: "47" },
+    { label: "Warszawa, Lotnisko-Ok\u0119cie", value: "1" }
+  ],
+  krakow: [{ label: "Krak\u00f3w, Lotnisko-Balice", value: "2" }],
+  gdansk: [{ label: "Gda\u0144sk, Lotnisko-R\u0119biechowo", value: "76" }],
+  katowice: [{ label: "Katowice, Lotnisko-Pyrzowice", value: "3" }],
+  wroclaw: [{ label: "Wroc\u0142aw, Lotnisko-Strachowice", value: "5" }],
+  poznan: [{ label: "Pozna\u0144, Lotnisko-\u0141awica", value: "57" }],
+  bydgoszcz: [{ label: "Bydgoszcz, Lotnisko-Szwederowo", value: "56" }],
+  lodz: [{ label: "\u0141\u00f3d\u017a, Lotnisko-Lublinek", value: "55" }]
 };
 
 function isRentCarsAirportOption(option) {
