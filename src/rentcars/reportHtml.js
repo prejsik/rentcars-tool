@@ -181,11 +181,15 @@ function normalizeScenarios(payload) {
 }
 
 function scenarioLocations(rootPayload, scenarioPayload) {
-  const tableLocations = Object.keys(scenarioPayload.top_3_by_location || {}).sort((a, b) => a.localeCompare(b));
-  if (tableLocations.length) {
-    return tableLocations;
+  const locations = new Set([
+    ...(Array.isArray(scenarioPayload.expected_locations) ? scenarioPayload.expected_locations : []),
+    ...Object.keys(scenarioPayload.top_3_by_location || {}),
+    ...(Array.isArray(scenarioPayload.errors) ? scenarioPayload.errors.map((error) => error.location) : [])
+  ].filter(Boolean));
+  if (locations.size) {
+    return [...locations].sort((a, b) => a.localeCompare(b));
   }
-  return Array.isArray(rootPayload.locations) ? rootPayload.locations : [];
+  return Array.isArray(rootPayload.locations) ? [...rootPayload.locations].sort((a, b) => a.localeCompare(b)) : [];
 }
 
 function scenarioTitle(scenarioPayload, index, total) {
@@ -208,6 +212,7 @@ function buildErrorsHtml(errors) {
 function buildScenarioRows(rootPayload, scenarioPayload) {
   const locations = scenarioLocations(rootPayload, scenarioPayload);
   const tableData = scenarioPayload.top_3_by_location || {};
+  const errors = Array.isArray(scenarioPayload.errors) ? scenarioPayload.errors : [];
 
   const rows = [];
   for (const location of locations) {
@@ -222,7 +227,12 @@ function buildScenarioRows(rootPayload, scenarioPayload) {
       const top3 = Array.isArray(locationData)
         ? locationData
         : Array.isArray(locationData[sortOrder]) ? locationData[sortOrder] : [];
-      rows.push({ location, sortOrder, top3 });
+      const matchingError = errors.find((error) => {
+        const sameLocation = String(error.location || "").toLowerCase() === String(location).toLowerCase();
+        const errorSortOrder = error.sort_order || "";
+        return sameLocation && (!errorSortOrder || errorSortOrder === sortOrder);
+      });
+      rows.push({ location, sortOrder, top3, error: matchingError || null });
     }
   }
 
@@ -230,10 +240,17 @@ function buildScenarioRows(rootPayload, scenarioPayload) {
     .map((row, index) => {
       const top3 = row.top3;
       const rowClass = index % 2 === 0 ? "even" : "odd";
+      const attemptText = row.error?.attempt_count ? ` after ${row.error.attempt_count} attempt(s)` : "";
+      const statusText = row.error
+        ? `Error${attemptText}: ${row.error.error || "Unknown error"}`
+        : top3.length
+          ? "OK"
+          : "No verified offers";
       return `<tr class="${rowClass}">
         <td class="index">${index}</td>
         <td class="location">${escapeHtml(row.location)}</td>
         <td>${escapeHtml(sortOrderLabel(row.sortOrder))}</td>
+        <td class="${row.error ? "check-error" : top3.length ? "check-ok" : "check-missing"}">${escapeHtml(statusText)}</td>
         ${buildProviderCell(top3[0], top3)}
         ${buildPriceCell(top3[0], top3)}
         ${buildProviderCell(top3[1], top3)}
@@ -259,6 +276,7 @@ function buildScenarioTable(rootPayload, scenarioPayload, index, total) {
           <th>(index)</th>
           <th>location</th>
           <th>sort_order</th>
+          <th>check_status</th>
           <th>top1_offer</th>
           <th>top1_daily_price</th>
           <th>top2_offer</th>
@@ -283,9 +301,15 @@ function buildHtmlReport(payload) {
   const progressText = Number.isFinite(Number(payload.expected_scenario_count))
     ? `${Number(payload.completed_scenario_count ?? scenarios.length)} / ${Number(payload.expected_scenario_count)} scenarios`
     : `${scenarios.length} scenarios`;
-  const partialNotice = payload.is_partial
-    ? `<div class="notice">Partial report: ${escapeHtml(progressText)} completed before the run stopped.</div>`
+  const checkProgressText = Number.isFinite(Number(payload.expected_check_count))
+    ? `${Number(payload.successful_check_count || 0)} successful, ${Number(payload.failed_check_count || 0)} failed, ${Number(payload.missing_check_count || 0)} missing / ${Number(payload.expected_check_count)} checks`
     : "";
+  const runStatus = payload.run_status || (payload.is_partial ? "partial" : "complete");
+  const statusNotice = runStatus === "partial"
+    ? `<div class="notice">Partial report: ${escapeHtml(progressText)}. ${escapeHtml(checkProgressText)}</div>`
+    : runStatus === "complete_with_errors"
+      ? `<div class="notice warning">Complete with errors: ${escapeHtml(progressText)}. ${escapeHtml(checkProgressText)}</div>`
+      : "";
 
   return `<!doctype html>
 <html lang="pl">
@@ -416,6 +440,14 @@ function buildHtmlReport(payload) {
       color: #ffb4a9;
     }
 
+    td.check-ok { color: #8bd49c; }
+    td.check-missing { color: #f5c76b; }
+    td.check-error {
+      color: #ffb4a9;
+      white-space: normal;
+      min-width: 240px;
+    }
+
     .footer {
       border-top: 2px solid #2d333b;
       color: var(--muted);
@@ -434,6 +466,12 @@ function buildHtmlReport(payload) {
       font-weight: 700;
     }
 
+    .notice.warning {
+      border-color: #dc2626;
+      background: #2a1111;
+      color: #ffd0cc;
+    }
+
     @media (max-width: 980px) {
       body { padding: 14px; }
       .scenario { overflow-x: auto; }
@@ -444,7 +482,7 @@ function buildHtmlReport(payload) {
 <body>
   <h1>RentCars.pl report</h1>
   <div class="meta">Generated at: ${escapeHtml(generatedAt)} | Time zone: ${escapeHtml(payload.time_zone || "Europe/Warsaw")} | Source: ${escapeHtml(payload.source_url || "https://rentcars.pl")}</div>
-  ${partialNotice}
+  ${statusNotice}
   <div class="legend">
     <span><span class="badge mm">MM Cars Rental</span> MM Cars Rental in table</span>
     <span><span class="badge mm mm-close">MM close</span> MM Cars Rental max 10 PLN/day more expensive than a higher-ranked competitor</span>

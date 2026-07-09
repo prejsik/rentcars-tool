@@ -30,6 +30,20 @@ function Show-MessageBox {
   )
 }
 
+function Get-DefaultLocations {
+  $catalogPath = Join-Path $root "src\rentcars\locations.json"
+  if (-not (Test-Path $catalogPath)) {
+    throw "Missing shared location catalog: $catalogPath"
+  }
+
+  return @(
+    Get-Content -Raw -LiteralPath $catalogPath |
+      ConvertFrom-Json |
+      ForEach-Object { [string]$_.city } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  )
+}
+
 function Ensure-Requirements {
   $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
   if (-not $nodeCommand) {
@@ -43,6 +57,8 @@ function Ensure-Requirements {
     throw "Missing src\rentcars\run.js."
   }
 
+  [void](Get-DefaultLocations)
+
   $playwrightPackagePath = Join-Path $root "node_modules\playwright\package.json"
   if (-not (Test-Path $playwrightPackagePath)) {
     Show-MessageBox -Message "Dependencies were not found. Run setup.bat first, then start-rentcars.bat again." -Type Error
@@ -53,6 +69,7 @@ function Ensure-Requirements {
 function Show-RunPicker {
   Add-Type -AssemblyName System.Windows.Forms
   Add-Type -AssemblyName System.Drawing
+  $catalogCities = @(Get-DefaultLocations)
 
   $form = New-Object System.Windows.Forms.Form
   $form.Text = "RentCars.pl - Options"
@@ -125,7 +142,7 @@ function Show-RunPicker {
   $locationsLabel.Top = 340
   $locationsLabel.Width = 500
   $locationsLabel.Height = 34
-  $locationsLabel.Text = "Cities checked by default match DiscoverCars plus added airports:`nWarszawa, Krakow, Gdansk, Katowice, Wroclaw, Poznan, Bydgoszcz, Lodz."
+  $locationsLabel.Text = "Cities checked by default match the shared RentCars catalog:`n$($catalogCities -join ', ')."
   $form.Controls.Add($locationsLabel)
 
   $startDatesLabel = New-Object System.Windows.Forms.Label
@@ -506,7 +523,8 @@ function Invoke-ProcessWithProgress {
     [Parameter(Mandatory = $true)]
     [string]$StdOutPath,
     [Parameter(Mandatory = $true)]
-    [string]$StdErrPath
+    [string]$StdErrPath,
+    [int]$ExpectedSteps = 0
   )
 
   Add-Type -AssemblyName System.Windows.Forms
@@ -516,7 +534,7 @@ function Invoke-ProcessWithProgress {
   $progressForm.Text = "RentCars.pl - Running"
   $progressForm.StartPosition = "CenterScreen"
   $progressForm.Width = 440
-  $progressForm.Height = 135
+  $progressForm.Height = 155
   $progressForm.TopMost = $true
   $progressForm.ControlBox = $false
 
@@ -524,17 +542,24 @@ function Invoke-ProcessWithProgress {
   $label.Left = 18
   $label.Top = 18
   $label.Width = 390
-  $label.Height = 34
+  $label.Height = 52
   $label.Text = $StatusText
   $progressForm.Controls.Add($label)
 
   $bar = New-Object System.Windows.Forms.ProgressBar
   $bar.Left = 18
-  $bar.Top = 62
+  $bar.Top = 82
   $bar.Width = 390
   $bar.Height = 22
-  $bar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-  $bar.MarqueeAnimationSpeed = 35
+  if ($ExpectedSteps -gt 0) {
+    $bar.Style = [System.Windows.Forms.ProgressBarStyle]::Blocks
+    $bar.Minimum = 0
+    $bar.Maximum = 100
+    $bar.Value = 0
+  } else {
+    $bar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+    $bar.MarqueeAnimationSpeed = 35
+  }
   $progressForm.Controls.Add($bar)
 
   $progressForm.Show()
@@ -550,7 +575,22 @@ function Invoke-ProcessWithProgress {
       -RedirectStandardError $StdErrPath `
       -PassThru
 
+    $lastProgressRead = [datetime]::MinValue
     while (-not $process.WaitForExit(250)) {
+      if ($ExpectedSteps -gt 0 -and ((Get-Date) - $lastProgressRead).TotalMilliseconds -ge 750) {
+        $lastProgressRead = Get-Date
+        $progressLine = @(
+          Get-Content -LiteralPath $StdOutPath -Tail 30 -ErrorAction SilentlyContinue |
+            Select-String -Pattern "^PROGRESS\s+\d+/\d+\s+\(\d+%\)\s+\|\s+elapsed\s+.+\s+\|\s+ETA\s+.+$"
+        ) | Select-Object -Last 1
+        if ($progressLine) {
+          $progressText = [string]$progressLine.Line
+          $label.Text = $progressText
+          if ($progressText -match "\((\d+)%\)") {
+            $bar.Value = [Math]::Max(0, [Math]::Min(100, [int]$matches[1]))
+          }
+        }
+      }
       [System.Windows.Forms.Application]::DoEvents()
     }
 
@@ -608,7 +648,7 @@ try {
   $stdoutLog = Join-Path $outputDir "rentcars-run-log.txt"
   $stderrLog = Join-Path $outputDir "rentcars-run-error.txt"
 
-  $locationsCsv = "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
+  $locationsCsv = (@(Get-DefaultLocations) -join ",")
   $configPath = Join-Path $root "rentcars.config.example.json"
 
   $nodeArgs = @(
@@ -627,7 +667,8 @@ try {
     -Arguments $nodeArgs `
     -StatusText "Running RentCars.pl scraper. This can take a while." `
     -StdOutPath $stdoutLog `
-    -StdErrPath $stderrLog
+    -StdErrPath $stderrLog `
+    -ExpectedSteps ($startDates.Count * $durations.Count)
 
   if ($runExitCode -ne 0) {
     Show-MessageBox -Message "RentCars.pl scraper finished with error code $runExitCode.`nLogs:`n$stdoutLog`n$stderrLog" -Type Error

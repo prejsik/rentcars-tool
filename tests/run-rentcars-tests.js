@@ -1,11 +1,19 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 
 const { loadConfig } = require("../src/rentcars/config");
 const { parseMoney, toCsv } = require("../src/rentcars/utils");
-const { RentCarsScraper, filterOffersByTransmissionPreference, findRentCarsLocationMatches } = require("../src/rentcars/scraper");
+const {
+  RentCarsScraper,
+  filterOffersByTransmissionPreference,
+  findRentCarsLocationMatches,
+  shouldRetryLocationOutcome
+} = require("../src/rentcars/scraper");
 const { buildHtmlReport } = require("../src/rentcars/reportHtml");
-const { buildRootPayload } = require("../src/rentcars/run");
+const { buildWorkbook } = require("../src/rentcars/reportXlsx");
+const { buildRootPayload, buildScenarioPayload, progressLine } = require("../src/rentcars/run");
 const { mergePayloads } = require("../src/rentcars/mergeResults");
+const { defaultLocationCities, expectedAirportCount } = require("../src/rentcars/locations");
 
 function runTest(name, fn) {
   try {
@@ -46,6 +54,13 @@ runTest("loadConfig uses RentCars defaults and output folders", () => {
   assert.equal(config.maxAdditionalResultPages, 1);
   assert.match(config.outputCsv, /rentcars-results-/);
   assert.match(config.artifactsDir, /artifacts[\\/]rentcars$/);
+});
+
+runTest("shared location catalog is the default and includes nine airport checks", () => {
+  const config = loadConfig(["--config=rentcars.config.example.json"]);
+
+  assert.deepEqual(config.locations, defaultLocationCities());
+  assert.equal(expectedAirportCount(config.locations), 9);
 });
 
 runTest("loadConfig supports one rolling start date and duration 2", () => {
@@ -177,6 +192,34 @@ runTest("automatic transmission filtering keeps unknown offers when no automatic
   ], "automatic");
 
   assert.deepEqual(offers.map((offer) => offer.provider), ["B", "C"]);
+});
+
+runTest("transient RentCars form failures are eligible for retry", () => {
+  assert.equal(shouldRetryLocationOutcome({ error: new Error("Could not find the RentCars.pl search button.") }), true);
+  assert.equal(shouldRetryLocationOutcome({ error: new Error("Could not select pick-up location from autocomplete.") }), true);
+  assert.equal(shouldRetryLocationOutcome({ error: new Error("Unsupported configuration value.") }), false);
+});
+
+runTest("insurance mode rejects an ambiguous network total and accepts an explicit protected price", () => {
+  const scraper = new RentCarsScraper({ transmission: "automatic" });
+  const target = {
+    requestedLocation: "Warszawa",
+    location: "Warszawa, Lotnisko-Okęcie",
+    value: "1",
+    sortOrder: "price_insurance",
+    priceMode: "insurance"
+  };
+
+  assert.equal(scraper.normalizeOfferCandidate({ providerName: "Provider A", totalPrice: 150 }, target, "network"), null);
+  const verified = scraper.normalizeOfferCandidate({
+    providerName: "Provider A",
+    totalPrice: 150,
+    protectedPrice: 219
+  }, target, "network");
+  assert.equal(verified.totalPrice, 219);
+  assert.equal(verified.basePrice, 150);
+  assert.equal(verified.protectedPrice, 219);
+  assert.equal(verified.priceVerified, true);
 });
 
 runTest("city location expansion keeps only RentCars airport pickup points", () => {
@@ -374,7 +417,155 @@ runTest("buildRootPayload and HTML report mark partial scheduled snapshots", () 
 
   assert.equal(payload.is_partial, true);
   assert.equal(payload.expected_scenario_count, 270);
-  assert.match(html, /Partial report: 0 \/ 270 scenarios completed/);
+  assert.match(html, /Partial report: 0 \/ 270 scenarios/);
+});
+
+runTest("completed scenarios with failed airport checks are reported as complete with errors", () => {
+  const config = {
+    baseUrl: "https://rentcars.pl",
+    locations: ["Warszawa"],
+    sortOrders: ["price_insurance"]
+  };
+  const scenarioConfig = {
+    ...config,
+    pickupDate: "2026-07-10",
+    pickupTime: "10:00",
+    dropoffDate: "2026-07-12",
+    dropoffTime: "10:00"
+  };
+  const expectedTargets = [
+    {
+      requestedLocation: "Warszawa",
+      location: "Warszawa, Lotnisko-Modlin",
+      pickupLocationId: "47",
+      sortOrder: "price_insurance",
+      sortLabel: "po cenie z ubezpieczeniem",
+      priceMode: "insurance"
+    },
+    {
+      requestedLocation: "Warszawa",
+      location: "Warszawa, Lotnisko-Okęcie",
+      pickupLocationId: "1",
+      sortOrder: "price_insurance",
+      sortLabel: "po cenie z ubezpieczeniem",
+      priceMode: "insurance"
+    }
+  ];
+  const scenario = buildScenarioPayload({
+    config,
+    scenarioConfig,
+    durationDays: 2,
+    expectedTargets,
+    results: [{
+      requestedLocation: "Warszawa",
+      pickupLocation: "Warszawa, Lotnisko-Okęcie",
+      pickupLocationId: "1",
+      sortOrder: "price_insurance",
+      sortLabel: "po cenie z ubezpieczeniem",
+      priceMode: "insurance",
+      provider: "MM Cars Rental",
+      totalPrice: 219,
+      basePrice: 150,
+      protectedPrice: 219,
+      priceVerified: true,
+      currency: "PLN",
+      source: "dom"
+    }],
+    failures: [{
+      requestedLocation: "Warszawa",
+      location: "Warszawa, Lotnisko-Modlin",
+      sortOrder: "price_insurance",
+      sortLabel: "po cenie z ubezpieczeniem",
+      attemptCount: 3,
+      error: "Could not find the RentCars.pl search button."
+    }]
+  });
+  const payload = buildRootPayload({
+    config,
+    scenarios: [scenario],
+    startedAt: "2026-07-09T01:00:00.000Z",
+    durationMs: 1000,
+    expectedScenarioCount: 1,
+    expectedCheckCount: 2
+  });
+  const html = buildHtmlReport(payload);
+
+  assert.equal(payload.run_status, "complete_with_errors");
+  assert.equal(payload.is_partial, false);
+  assert.equal(payload.successful_check_count, 1);
+  assert.equal(payload.failed_check_count, 1);
+  assert.equal(scenario.results[0].insurance_surcharge, 69);
+  assert.match(html, /Complete with errors/);
+  assert.match(html, /Warszawa, Lotnisko-Modlin/);
+  assert.match(html, /Error after 3 attempt\(s\): Could not find the RentCars\.pl search button/);
+});
+
+runTest("progress output includes percentage, elapsed time, and ETA", () => {
+  assert.equal(progressLine(2, 10, 60000), "PROGRESS 2/10 (20%) | elapsed 1m 0s | ETA 4m 0s");
+});
+
+runTest("push smoke cannot deploy Pages or notify Telegram", () => {
+  const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
+  const smoke = fs.readFileSync(".github/workflows/rentcars-smoke.yml", "utf8");
+
+  assert.doesNotMatch(daily, /^  push:/m);
+  assert.match(smoke, /^  push:/m);
+  assert.doesNotMatch(smoke, /deploy-pages|Notify Telegram|github-pages/i);
+});
+
+runTest("Excel summary contains all pricing and data-quality sheets", () => {
+  const workbook = buildWorkbook({
+    generated_at: "2026-07-09T12:00:00.000Z",
+    source_url: "https://rentcars.pl",
+    run_status: "complete",
+    completed_scenario_count: 1,
+    expected_scenario_count: 1,
+    expected_check_count: 1,
+    successful_check_count: 1,
+    failed_check_count: 0,
+    missing_check_count: 0,
+    sort_orders: ["price_insurance"],
+    scenarios: [{
+      start_date: "2026-07-10",
+      rental_days: 2,
+      expected_locations: ["Warszawa, Lotnisko-Okęcie"],
+      sort_orders: [{ order: "price_insurance" }],
+      errors: [],
+      results: [
+        {
+          pickup_location: "Warszawa, Lotnisko-Okęcie",
+          sort_order: "price_insurance",
+          provider_name: "MM Cars Rental",
+          total_price: 200,
+          daily_price: 100,
+          rental_days: 2,
+          currency: "PLN"
+        },
+        {
+          pickup_location: "Warszawa, Lotnisko-Okęcie",
+          sort_order: "price_insurance",
+          provider_name: "Provider B",
+          total_price: 230,
+          daily_price: 115,
+          rental_days: 2,
+          currency: "PLN"
+        }
+      ]
+    }]
+  });
+
+  assert.deepEqual(workbook.worksheets.map((sheet) => sheet.name), [
+    "Overview",
+    "Recommendations",
+    "By airport",
+    "By duration",
+    "Opportunities",
+    "Top1 competitors",
+    "Details",
+    "Data quality"
+  ]);
+  assert.ok(workbook.getWorksheet("Details").rowCount >= 5);
+  assert.equal(workbook.getWorksheet("Overview").getCell("B5").value, "complete");
 });
 
 runTest("mergePayloads combines matrix chunks into one sorted root report", () => {
@@ -393,7 +584,7 @@ runTest("mergePayloads combines matrix chunks into one sorted root report", () =
             scenario_id: "2026-06-02-3",
             start_date: "2026-06-02",
             rental_days: 3,
-            results: [{ total_price: 300 }],
+            results: [{ total_price: 300, pickup_location: "Warszawa, Lotnisko-Okecie", sort_order: "price_insurance" }],
             top_3_by_location: { "Warszawa, Lotnisko-Okecie": { price_insurance: [] } },
             errors: []
           }
@@ -418,7 +609,7 @@ runTest("mergePayloads combines matrix chunks into one sorted root report", () =
             scenario_id: "2026-06-01-2",
             start_date: "2026-06-01",
             rental_days: 2,
-            results: [{ total_price: 200 }],
+            results: [{ total_price: 200, pickup_location: "Warszawa, Lotnisko-Modlin", sort_order: "price_insurance" }],
             top_3_by_location: { "Warszawa, Lotnisko-Modlin": { price_insurance: [] } },
             errors: []
           }
@@ -427,6 +618,7 @@ runTest("mergePayloads combines matrix chunks into one sorted root report", () =
     }
   ], {
     expectedScenarioCount: 2,
+    expectedCheckCount: 2,
     startedAt: "2026-05-14T03:00:00.000Z",
     generatedAt: "2026-05-14T03:01:30.000Z",
     locations: ["Warszawa"],
@@ -437,6 +629,10 @@ runTest("mergePayloads combines matrix chunks into one sorted root report", () =
   assert.equal(payload.scenario_count, 2);
   assert.equal(payload.completed_scenario_count, 2);
   assert.equal(payload.expected_scenario_count, 2);
+  assert.equal(payload.expected_check_count, 2);
+  assert.equal(payload.successful_check_count, 2);
+  assert.equal(payload.failed_check_count, 0);
+  assert.equal(payload.run_status, "complete");
   assert.equal(payload.is_partial, false);
   assert.equal(payload.execution_duration_ms, 90000);
   assert.deepEqual(payload.scenarios.map((scenario) => scenario.scenario_id), ["2026-06-01-2", "2026-06-02-3"]);

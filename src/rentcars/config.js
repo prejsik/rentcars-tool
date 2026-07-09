@@ -7,6 +7,7 @@ const {
   parseTime,
   uniqueStrings
 } = require("./utils");
+const { defaultLocationCities } = require("./locations");
 
 function parseCliArgs(argv) {
   const args = {
@@ -376,7 +377,9 @@ function loadConfig(argv) {
 
   const locations = (cli.locations || []).length
     ? uniqueStrings(cli.locations)
-    : uniqueStrings(Array.isArray(fileConfig.locations) ? fileConfig.locations : []);
+    : uniqueStrings(Array.isArray(fileConfig.locations) && fileConfig.locations.length
+      ? fileConfig.locations
+      : defaultLocationCities());
 
   const pickupDate = configValue(cli, fileConfig, ["pickupDate", "pickup-date"]);
   const pickupTime = configValue(cli, fileConfig, ["pickupTime", "pickup-time"]);

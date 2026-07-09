@@ -21,6 +21,7 @@ function parseMergeArgs(argv) {
     inputDir: "downloaded-parts",
     outputJson: path.join("output", "rentcars-results-latest.json"),
     expectedScenarioCount: null,
+    expectedCheckCount: null,
     startedAt: "",
     baseUrl: "",
     locations: [],
@@ -50,6 +51,8 @@ function parseMergeArgs(argv) {
       args.outputJson = readValue("--output-json");
     } else if (token === "--expected-scenario-count" || token.startsWith("--expected-scenario-count=")) {
       args.expectedScenarioCount = toPositiveInteger(readValue("--expected-scenario-count"));
+    } else if (token === "--expected-check-count" || token.startsWith("--expected-check-count=")) {
+      args.expectedCheckCount = toPositiveInteger(readValue("--expected-check-count"));
     } else if (token === "--started-at" || token.startsWith("--started-at=")) {
       args.startedAt = readValue("--started-at");
     } else if (token === "--base-url" || token.startsWith("--base-url=")) {
@@ -118,6 +121,23 @@ function scenarioScore(scenario) {
   return results + locations - errors;
 }
 
+function successfulCheckCountForScenario(scenario) {
+  const explicit = Number(scenario?.successful_check_count);
+  if (Number.isFinite(explicit) && explicit >= 0) {
+    return explicit;
+  }
+
+  const successfulTargets = new Set();
+  for (const result of Array.isArray(scenario?.results) ? scenario.results : []) {
+    const location = normalizeWhitespace(result?.pickup_location || result?.location).toLowerCase();
+    const sortOrder = normalizeWhitespace(result?.sort_order || "suggested").toLowerCase();
+    if (location) {
+      successfulTargets.add(`${location}|${sortOrder}`);
+    }
+  }
+  return successfulTargets.size;
+}
+
 function sortScenarios(left, right) {
   const leftDate = normalizeWhitespace(left?.start_date || left?.start_day_label || left?.pickup_date);
   const rightDate = normalizeWhitespace(right?.start_date || right?.start_day_label || right?.pickup_date);
@@ -174,6 +194,28 @@ function mergePayloads(entries, options = {}) {
   const expectedScenarioCount = toPositiveInteger(options.expectedScenarioCount)
     || expectedFromParts
     || scenarios.length;
+  const expectedChecksFromParts = payloads.reduce((sum, payload) => {
+    const expected = toPositiveInteger(payload.expected_check_count);
+    return sum + (expected || 0);
+  }, 0);
+  const expectedCheckCount = toPositiveInteger(options.expectedCheckCount)
+    || expectedChecksFromParts
+    || scenarios.reduce((sum, scenario) => sum + Number(scenario.expected_check_count || 0), 0);
+  const successfulCheckCount = scenarios.reduce(
+    (sum, scenario) => sum + successfulCheckCountForScenario(scenario),
+    0
+  );
+  const failedCheckCount = scenarios.reduce(
+    (sum, scenario) => sum + Number(scenario.failed_check_count ?? scenario.errors?.length ?? 0),
+    0
+  );
+  const completedCheckCount = successfulCheckCount + failedCheckCount;
+  const isPartial = scenarios.length < expectedScenarioCount || completedCheckCount < expectedCheckCount;
+  const runStatus = isPartial
+    ? "partial"
+    : failedCheckCount > 0
+      ? "complete_with_errors"
+      : "complete";
   const startedAt = options.startedAt
     || earliestIso(payloads.map((payload) => payload.execution_started_at))
     || new Date().toISOString();
@@ -193,7 +235,14 @@ function mergePayloads(entries, options = {}) {
     scenario_count: scenarios.length,
     expected_scenario_count: expectedScenarioCount,
     completed_scenario_count: scenarios.length,
-    is_partial: scenarios.length < expectedScenarioCount,
+    expected_check_count: expectedCheckCount,
+    completed_check_count: completedCheckCount,
+    successful_check_count: successfulCheckCount,
+    failed_check_count: failedCheckCount,
+    missing_check_count: Math.max(0, expectedCheckCount - completedCheckCount),
+    run_status: runStatus,
+    has_errors: failedCheckCount > 0,
+    is_partial: isPartial,
     execution_duration_ms: executionDurationMs,
     execution_started_at: startedAt,
     chunk_count: payloads.length,
@@ -202,6 +251,10 @@ function mergePayloads(entries, options = {}) {
       scenario_count: Number(entry.payload?.scenario_count ?? entry.payload?.scenarios?.length ?? 0),
       expected_scenario_count: Number(entry.payload?.expected_scenario_count ?? entry.payload?.scenarios?.length ?? 0),
       completed_scenario_count: Number(entry.payload?.completed_scenario_count ?? entry.payload?.scenarios?.length ?? 0),
+      expected_check_count: Number(entry.payload?.expected_check_count || 0),
+      successful_check_count: Number(entry.payload?.successful_check_count || 0),
+      failed_check_count: Number(entry.payload?.failed_check_count || 0),
+      run_status: entry.payload?.run_status || "",
       is_partial: Boolean(entry.payload?.is_partial),
       generated_at: entry.payload?.generated_at || ""
     })),
@@ -214,6 +267,7 @@ function printHelp() {
 
 Options:
   --expected-scenario-count N
+  --expected-check-count N
   --started-at ISO_DATE
   --base-url URL
   --locations CSV

@@ -1,14 +1,4 @@
 {
-  "locations": [
-    "Warszawa",
-    "Krakow",
-    "Gdansk",
-    "Katowice",
-    "Wroclaw",
-    "Poznan",
-    "Bydgoszcz",
-    "Lodz"
-  ],
   "pickupDate": "2026-05-15",
   "pickupTime": "10:00",
   "dropoffDate": "2026-05-17",

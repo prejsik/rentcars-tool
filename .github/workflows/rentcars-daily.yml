@@ -1,27 +1,15 @@
 name: RentCars daily run
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/rentcars-daily.yml"
-      - "src/rentcars/**"
-      - "rentcars.config.example.json"
-      - "package.json"
-      - "package-lock.json"
-      - "README.md"
-  # GitHub cron uses UTC. These two entries plus the Warsaw-hour gate below
-  # keep the real run near 01:17 Europe/Warsaw during both summer and winter time.
   schedule:
     - cron: "17 23 * * *"
     - cron: "17 0 * * *"
   workflow_dispatch:
     inputs:
       locations:
-        description: "Comma-separated RentCars.pl locations"
-        required: true
-        default: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
+        description: "Comma-separated locations; blank uses the shared catalog"
+        required: false
+        default: ""
       rolling_days:
         description: "How many pickup start dates from tomorrow"
         required: true
@@ -49,20 +37,12 @@ permissions:
   id-token: write
 
 env:
-  SCHEDULE_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
   SCHEDULE_ROLLING_DAYS: "30"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10"
   SCHEDULE_SPEED_MODE: "fast"
   SCHEDULE_SORT_ORDERS: "price_insurance"
   SCHEDULE_LOCATION_CONCURRENCY: "6"
-  SCHEDULE_CHUNK_SCRAPER_TIMEOUT: "90m"
-  PUSH_TEST_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
-  PUSH_TEST_ROLLING_DAYS: "1"
-  PUSH_TEST_DURATIONS: "2"
-  PUSH_TEST_SPEED_MODE: "fast"
-  PUSH_TEST_SORT_ORDERS: "price_insurance"
-  PUSH_TEST_LOCATION_CONCURRENCY: "2"
-  PUSH_TEST_CHUNK_SCRAPER_TIMEOUT: "45m"
+  SCHEDULE_CHUNK_SCRAPER_TIMEOUT: "135m"
 
 jobs:
   plan:
@@ -78,10 +58,14 @@ jobs:
       location_concurrency: ${{ steps.options.outputs.location_concurrency }}
       chunk_timeout: ${{ steps.options.outputs.chunk_timeout }}
       expected_scenario_count: ${{ steps.options.outputs.expected_scenario_count }}
+      expected_check_count: ${{ steps.options.outputs.expected_check_count }}
       run_started_at: ${{ steps.options.outputs.run_started_at }}
       matrix: ${{ steps.options.outputs.matrix }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Check Warsaw schedule gate
         id: gate
         shell: bash
@@ -89,11 +73,8 @@ jobs:
           warsaw_now="$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')"
           trigger_schedule="${{ github.event.schedule }}"
 
-          echo "warsaw_now=$warsaw_now" >> "$GITHUB_OUTPUT"
           echo "Warsaw time now: $warsaw_now"
-
           if [[ "${{ github.event_name }}" != "schedule" ]]; then
-            echo "Non-scheduled run requested, bypassing schedule gate."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -107,12 +88,9 @@ jobs:
 
           echo "Schedule expression: $trigger_schedule"
           echo "Scheduled UTC trigger maps to Warsaw: $intended_warsaw_time"
-
           if [[ "$intended_warsaw_hour" == "01" ]]; then
-            echo "This scheduled trigger targets 01:xx in Warsaw, running scraper."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "This scheduled trigger does not target 01:xx in Warsaw, skipping."
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -128,7 +106,7 @@ jobs:
           INPUT_LOCATION_CONCURRENCY: ${{ inputs.location_concurrency }}
         run: |
           if [[ "${{ steps.gate.outputs.should_run }}" != "true" ]]; then
-            echo 'matrix={"include":[{"start_date":"skip"}]}' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"chunk_id":"skip","start_dates":"skip"}]}' >> "$GITHUB_OUTPUT"
             echo "locations=" >> "$GITHUB_OUTPUT"
             echo "rolling_days=0" >> "$GITHUB_OUTPUT"
             echo "durations=" >> "$GITHUB_OUTPUT"
@@ -137,37 +115,26 @@ jobs:
             echo "location_concurrency=1" >> "$GITHUB_OUTPUT"
             echo "chunk_timeout=1m" >> "$GITHUB_OUTPUT"
             echo "expected_scenario_count=0" >> "$GITHUB_OUTPUT"
+            echo "expected_check_count=0" >> "$GITHUB_OUTPUT"
             echo "run_started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            default_locations="$PUSH_TEST_LOCATIONS"
-            default_rolling_days="$PUSH_TEST_ROLLING_DAYS"
-            default_durations="$PUSH_TEST_DURATIONS"
-            default_speed_mode="$PUSH_TEST_SPEED_MODE"
-            default_sort_orders="$PUSH_TEST_SORT_ORDERS"
-            default_location_concurrency="$PUSH_TEST_LOCATION_CONCURRENCY"
-            chunk_timeout="$PUSH_TEST_CHUNK_SCRAPER_TIMEOUT"
-          else
-            default_locations="$SCHEDULE_LOCATIONS"
-            default_rolling_days="$SCHEDULE_ROLLING_DAYS"
-            default_durations="$SCHEDULE_DURATIONS"
-            default_speed_mode="$SCHEDULE_SPEED_MODE"
-            default_sort_orders="$SCHEDULE_SORT_ORDERS"
-            default_location_concurrency="$SCHEDULE_LOCATION_CONCURRENCY"
-            chunk_timeout="$SCHEDULE_CHUNK_SCRAPER_TIMEOUT"
-          fi
-
-          locations="${INPUT_LOCATIONS:-$default_locations}"
-          rolling_days="${INPUT_ROLLING_DAYS:-$default_rolling_days}"
-          durations="${INPUT_DURATIONS:-$default_durations}"
-          speed_mode="${INPUT_SPEED_MODE:-$default_speed_mode}"
-          sort_orders="${INPUT_SORT_ORDERS:-$default_sort_orders}"
-          location_concurrency="${INPUT_LOCATION_CONCURRENCY:-$default_location_concurrency}"
+          catalog_locations="$(node -e "const { defaultLocationCities } = require('./src/rentcars/locations'); process.stdout.write(defaultLocationCities().join(','));")"
+          locations="${INPUT_LOCATIONS:-$catalog_locations}"
+          rolling_days="${INPUT_ROLLING_DAYS:-$SCHEDULE_ROLLING_DAYS}"
+          durations="${INPUT_DURATIONS:-$SCHEDULE_DURATIONS}"
+          speed_mode="${INPUT_SPEED_MODE:-$SCHEDULE_SPEED_MODE}"
+          sort_orders="${INPUT_SORT_ORDERS:-$SCHEDULE_SORT_ORDERS}"
+          location_concurrency="${INPUT_LOCATION_CONCURRENCY:-$SCHEDULE_LOCATION_CONCURRENCY}"
+          chunk_timeout="$SCHEDULE_CHUNK_SCRAPER_TIMEOUT"
 
           if ! [[ "$rolling_days" =~ ^[0-9]+$ ]] || [[ "$rolling_days" -lt 1 ]]; then
             echo "::error::rolling_days must be a positive integer. Received: $rolling_days"
+            exit 1
+          fi
+          if ! [[ "$location_concurrency" =~ ^[1-6]$ ]]; then
+            echo "::error::location_concurrency must be an integer from 1 to 6. Received: $location_concurrency"
             exit 1
           fi
 
@@ -175,24 +142,41 @@ jobs:
           IFS=',' read -ra duration_parts <<< "$durations"
           for duration in "${duration_parts[@]}"; do
             trimmed="${duration//[[:space:]]/}"
-            if [[ -n "$trimmed" ]]; then
-              duration_count=$((duration_count + 1))
+            if ! [[ "$trimmed" =~ ^[0-9]+$ ]] || [[ "$trimmed" -lt 1 ]]; then
+              echo "::error::durations must contain positive integers. Received: $duration"
+              exit 1
             fi
+            duration_count=$((duration_count + 1))
           done
-
-          if [[ "$duration_count" -lt 1 ]]; then
-            echo "::error::durations must contain at least one value. Received: $durations"
-            exit 1
-          fi
 
           rolling_days_number=$((10#$rolling_days))
           expected_scenario_count=$((rolling_days_number * duration_count))
+          airport_count="$(node -e "const { expectedAirportCount } = require('./src/rentcars/locations'); process.stdout.write(String(expectedAirportCount(process.argv[1].split(','))));" "$locations")"
+          sort_count="$(node -e "process.stdout.write(String(process.argv[1].split(',').map(x => x.trim()).filter(Boolean).length || 1));" "$sort_orders")"
+          expected_check_count=$((expected_scenario_count * airport_count * sort_count))
+
           dates=()
           for ((day_index=0; day_index<rolling_days_number; day_index++)); do
             dates+=("$(TZ=Europe/Warsaw date -d "tomorrow +${day_index} days" +%F)")
           done
 
-          matrix_json=$(node -e 'const dates = process.argv.slice(1); process.stdout.write(JSON.stringify({ include: dates.map((start_date) => ({ start_date })) }));' "${dates[@]}")
+          if [[ "$duration_count" -ge 11 ]]; then
+            chunk_size=3
+          else
+            chunk_size=5
+          fi
+          matrix_json=$(node -e '
+            const size = Number(process.argv[1]);
+            const dates = process.argv.slice(2);
+            const include = [];
+            for (let index = 0; index < dates.length; index += size) {
+              include.push({
+                chunk_id: String(include.length + 1).padStart(3, "0"),
+                start_dates: dates.slice(index, index + size).join(",")
+              });
+            }
+            process.stdout.write(JSON.stringify({ include }));
+          ' "$chunk_size" "${dates[@]}")
           run_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
           echo "locations=$locations" >> "$GITHUB_OUTPUT"
@@ -203,24 +187,23 @@ jobs:
           echo "location_concurrency=$location_concurrency" >> "$GITHUB_OUTPUT"
           echo "chunk_timeout=$chunk_timeout" >> "$GITHUB_OUTPUT"
           echo "expected_scenario_count=$expected_scenario_count" >> "$GITHUB_OUTPUT"
+          echo "expected_check_count=$expected_check_count" >> "$GITHUB_OUTPUT"
           echo "run_started_at=$run_started_at" >> "$GITHUB_OUTPUT"
           echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
 
           echo "Locations: $locations"
           echo "Rolling days: $rolling_days"
           echo "Durations: $durations"
-          echo "Sort orders: $sort_orders"
           echo "Expected scenarios: $expected_scenario_count"
-          echo "Speed mode: $speed_mode"
-          echo "Location concurrency: $location_concurrency"
-          echo "Chunk timeout: $chunk_timeout"
+          echo "Expected airport checks: $expected_check_count"
+          echo "Dates per chunk: $chunk_size"
 
   scrape:
-    name: Scrape ${{ matrix.start_date }}
+    name: Scrape chunk ${{ matrix.chunk_id }}
     needs: plan
     if: needs.plan.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -242,24 +225,25 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Run RentCars.pl scraper for one start date
+      - name: Run RentCars.pl scraper chunk
         id: scraper
         shell: bash
         run: |
           mkdir -p output
-          json_path="output/rentcars-results-${{ matrix.start_date }}.json"
-          log_path="output/rentcars-run-${{ matrix.start_date }}-log.txt"
-          error_path="output/rentcars-run-${{ matrix.start_date }}-error.txt"
+          chunk_id="${{ matrix.chunk_id }}"
+          json_path="output/rentcars-results-chunk-${chunk_id}.json"
+          log_path="output/rentcars-run-chunk-${chunk_id}-log.txt"
+          error_path="output/rentcars-run-chunk-${chunk_id}-error.txt"
           chunk_timeout="${{ needs.plan.outputs.chunk_timeout }}"
 
-          echo "Start date: ${{ matrix.start_date }}"
+          echo "Start dates: ${{ matrix.start_dates }}"
           echo "Chunk timeout: $chunk_timeout"
 
           set +e
           timeout --kill-after=30s "$chunk_timeout" node src/rentcars/run.js \
             --config rentcars.config.example.json \
             --locations="${{ needs.plan.outputs.locations }}" \
-            --start-dates="${{ matrix.start_date }}" \
+            --start-dates="${{ matrix.start_dates }}" \
             --durations-days="${{ needs.plan.outputs.durations }}" \
             --sort-orders="${{ needs.plan.outputs.sort_orders }}" \
             --speed-mode="${{ needs.plan.outputs.speed_mode }}" \
@@ -273,27 +257,23 @@ jobs:
 
           echo "scraper_status=$scraper_status" >> "$GITHUB_OUTPUT"
           if [[ "$scraper_status" -eq 124 ]]; then
-            echo "::warning::RentCars chunk ${{ matrix.start_date }} reached the controlled timeout after $chunk_timeout. Uploading the latest partial snapshot."
+            echo "::warning::Chunk $chunk_id reached its controlled timeout. Uploading the latest snapshot."
           elif [[ "$scraper_status" -ne 0 ]]; then
-            echo "::warning::RentCars chunk ${{ matrix.start_date }} exited with status $scraper_status. Uploading any files that were already created."
-          fi
-
-          if [[ ! -f "$json_path" && "$scraper_status" -ne 0 ]]; then
-            echo "::warning::RentCars chunk ${{ matrix.start_date }} did not create a JSON snapshot. The merge job will publish the remaining completed chunks."
+            echo "::warning::Chunk $chunk_id exited with status $scraper_status. Uploading available files."
           fi
 
       - name: Upload RentCars.pl chunk
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rentcars-part-${{ matrix.start_date }}
+          name: rentcars-part-${{ matrix.chunk_id }}
           path: |
-            output/rentcars-results-${{ matrix.start_date }}.json
-            output/rentcars-run-${{ matrix.start_date }}-log.txt
-            output/rentcars-run-${{ matrix.start_date }}-error.txt
+            output/rentcars-results-chunk-${{ matrix.chunk_id }}.json
+            output/rentcars-run-chunk-${{ matrix.chunk_id }}-log.txt
+            output/rentcars-run-chunk-${{ matrix.chunk_id }}-error.txt
             artifacts/rentcars/**
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
 
   merge:
     name: Merge and publish RentCars.pl report
@@ -332,6 +312,7 @@ jobs:
             --input-dir downloaded-parts \
             --output-json output/rentcars-results-latest.json \
             --expected-scenario-count="${{ needs.plan.outputs.expected_scenario_count }}" \
+            --expected-check-count="${{ needs.plan.outputs.expected_check_count }}" \
             --started-at="${{ needs.plan.outputs.run_started_at }}" \
             --base-url=https://rentcars.pl \
             --locations="${{ needs.plan.outputs.locations }}" \
@@ -344,6 +325,13 @@ jobs:
           node src/rentcars/reportHtml.js output/rentcars-results-latest.json output/rentcars-report.html
           echo "report_exists=true" >> "$GITHUB_OUTPUT"
 
+      - name: Generate RentCars.pl Excel summary
+        id: workbook
+        shell: bash
+        run: |
+          node src/rentcars/reportXlsx.js output/rentcars-results-latest.json output/rentcars-summary.xlsx
+          echo "workbook_exists=true" >> "$GITHUB_OUTPUT"
+
       - name: Ensure GitHub Pages is enabled
         id: pages-status
         if: always() && steps.report.outputs.report_exists == 'true'
@@ -352,67 +340,34 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           pages_api_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/pages"
-
-          get_status=$(
-            curl --silent --show-error \
-              --output /tmp/pages.json \
-              --write-out "%{http_code}" \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$pages_api_url"
-          )
+          get_status=$(curl --silent --show-error --output /tmp/pages.json --write-out "%{http_code}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$pages_api_url")
 
           if [[ "$get_status" == "200" ]]; then
-            page_url=$(node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync('/tmp/pages.json', 'utf8')); process.stdout.write(data.html_url || '');")
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "page_url=$page_url" >> "$GITHUB_OUTPUT"
-            echo "GitHub Pages is enabled: $page_url"
             exit 0
           fi
-
           if [[ "$get_status" != "404" ]]; then
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "page_url=" >> "$GITHUB_OUTPUT"
-            echo "::warning::GitHub Pages status check returned HTTP $get_status; Pages deploy skipped."
+            echo "::warning::GitHub Pages status check returned HTTP $get_status."
             exit 0
           fi
 
-          create_status=$(
-            curl --silent --show-error \
-              --request POST \
-              --output /tmp/pages-create.json \
-              --write-out "%{http_code}" \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              --data '{"build_type":"workflow"}' \
-              "$pages_api_url"
-          )
-
+          create_status=$(curl --silent --show-error --request POST --output /tmp/pages-create.json --write-out "%{http_code}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data '{"build_type":"workflow"}' \
+            "$pages_api_url")
           if [[ "$create_status" == "201" || "$create_status" == "409" || "$create_status" == "422" ]]; then
-            retry_status=$(
-              curl --silent --show-error \
-                --output /tmp/pages.json \
-                --write-out "%{http_code}" \
-                --header "Accept: application/vnd.github+json" \
-                --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-                --header "X-GitHub-Api-Version: 2022-11-28" \
-                "$pages_api_url"
-            )
-
-            if [[ "$retry_status" == "200" ]]; then
-              page_url=$(node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync('/tmp/pages.json', 'utf8')); process.stdout.write(data.html_url || '');")
-              echo "enabled=true" >> "$GITHUB_OUTPUT"
-              echo "page_url=$page_url" >> "$GITHUB_OUTPUT"
-              echo "GitHub Pages is enabled: $page_url"
-              exit 0
-            fi
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GitHub Pages could not be enabled; HTTP $create_status."
           fi
-
-          echo "enabled=false" >> "$GITHUB_OUTPUT"
-          echo "page_url=" >> "$GITHUB_OUTPUT"
-          echo "::warning::GitHub Pages is not enabled and could not be enabled automatically; Pages deploy skipped."
 
       - name: Prepare GitHub Pages site
         if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
@@ -421,7 +376,6 @@ jobs:
           mkdir -p pages
           cp output/rentcars-report.html pages/index.html
           cp output/rentcars-report.html pages/report.html
-          cp output/rentcars-results-latest.json pages/rentcars-results-latest.json
 
       - name: Configure GitHub Pages
         if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
@@ -450,43 +404,55 @@ jobs:
           path: |
             output/rentcars-results-latest.json
             output/rentcars-report.html
-            downloaded-parts/**
+            output/rentcars-summary.xlsx
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30
 
       - name: Notify Telegram
-        if: always() && steps.upload.outputs['artifact-url'] != ''
+        if: always()
         shell: bash
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PAGE_URL: ${{ steps.pages-deployment.outputs.page_url || steps.pages-status.outputs.page_url }}
+          PAGE_URL: ${{ steps.pages-deployment.outcome == 'success' && steps.pages-deployment.outputs.page_url || '' }}
           ARTIFACT_URL: ${{ steps.upload.outputs['artifact-url'] }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-            echo "::warning::Telegram secrets are missing; notification skipped."
-            exit 0
+            echo "::error::Telegram secrets are missing."
+            exit 1
           fi
 
           if [[ -f output/rentcars-results-latest.json ]]; then
-            progress=$(node -e "const fs=require('fs'); const data=JSON.parse(fs.readFileSync('output/rentcars-results-latest.json','utf8')); const completed=Number(data.completed_scenario_count ?? data.scenario_count ?? (data.scenarios || []).length); const expected=Number(data.expected_scenario_count ?? completed); const label=data.is_partial ? 'partial' : 'complete'; const chunks=Number(data.chunk_count || 0); process.stdout.write(label + ' ' + completed + '/' + expected + ' scenarios' + (chunks ? ', chunks=' + chunks : ''));")
+            progress=$(node -e '
+              const fs = require("fs");
+              const data = JSON.parse(fs.readFileSync("output/rentcars-results-latest.json", "utf8"));
+              const status = data.run_status || (data.is_partial ? "partial" : "complete");
+              const scenarios = `${data.completed_scenario_count || 0}/${data.expected_scenario_count || 0} scenarios`;
+              const checks = `${data.successful_check_count || 0} successful, ${data.failed_check_count || 0} failed, ${data.missing_check_count || 0} missing / ${data.expected_check_count || 0} checks`;
+              process.stdout.write(`${status}; ${scenarios}; ${checks}; generated ${data.generated_at || "unknown"}`);
+            ')
           else
-            progress="no JSON report"
+            progress="report generation failed; no merged JSON"
           fi
 
+          message=$(printf 'RentCars.pl: run finished (%s).\n\n' "$progress")
           if [[ -n "$PAGE_URL" ]]; then
-            report_url="${PAGE_URL%/}/report.html"
-            message=$(printf 'RentCars.pl: raport jest gotowy (%s).\n\nRaport HTML:\n%s\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$progress" "$report_url" "$ARTIFACT_URL" "$RUN_URL")
+            message+=$(printf 'Current HTML report:\n%sreport.html\n\n' "${PAGE_URL%/}/")
           else
-            message=$(printf 'RentCars.pl: raport jest gotowy (%s).\n\nArtifact:\n%s\n\nGitHub Actions run:\n%s\n' "$progress" "$ARTIFACT_URL" "$RUN_URL")
+            message+=$(printf 'GitHub Pages deployment was not confirmed for this run.\n\n')
           fi
+          if [[ -n "$ARTIFACT_URL" ]]; then
+            message+=$(printf 'Artifact backup:\n%s\n\n' "$ARTIFACT_URL")
+          fi
+          message+=$(printf 'GitHub Actions run:\n%s\n' "$RUN_URL")
 
-          if ! curl --fail --show-error --silent \
+          curl --fail --show-error --silent \
+            --retry 3 \
+            --retry-delay 3 \
+            --retry-all-errors \
             --request POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${message}" \
-            --data-urlencode "disable_web_page_preview=true"; then
-            echo "::warning::Telegram notification failed; scraper results were still uploaded."
-          fi
+            --data-urlencode "disable_web_page_preview=true"

@@ -12,6 +12,7 @@ const {
   toAccessibleDateLabels,
   writeTextFile
 } = require("./utils");
+const { locationCatalog, normalizeLocationKey } = require("./locations");
 
 const COOKIE_BUTTON_PATTERNS = [
   /akceptuj wszystkie/i,
@@ -60,7 +61,8 @@ function delay(ms) {
 }
 
 function shouldRetryLocationOutcome(outcome) {
-  return /No offers could be extracted|No valid offers/i.test(String(outcome?.error?.message || ""));
+  return /No offers could be extracted|No valid offers|Could not find|Could not select|was not accepted|timed? out|navigation|Target page|browser has been closed/i
+    .test(String(outcome?.error?.message || ""));
 }
 
 function isBlockedThirdPartyResource(url) {
@@ -87,12 +89,14 @@ class RentCarsScraper {
 
     const results = [];
     const failures = [];
+    let searchTargets = [];
+    let outcomes = [];
 
     try {
       const requestedLocations = Array.isArray(this.config.locations) ? [...this.config.locations] : [];
       const locationTargets = await this.resolveLocationSearchTargets(browser, requestedLocations);
       const sortOrders = normalizeSortOrders(this.config.sortOrders);
-      const searchTargets = [];
+      searchTargets = [];
       for (const locationTarget of locationTargets) {
         for (const sortOrder of sortOrders) {
           const sortOption = rentCarsSortOption(sortOrder);
@@ -107,36 +111,50 @@ class RentCarsScraper {
 
       const workerCount = clampPositiveInteger(this.config.locationConcurrency, 1, 1, 6);
       const boundedWorkers = Math.max(1, Math.min(workerCount, searchTargets.length || 1));
-      const outcomes = new Array(searchTargets.length);
+      outcomes = new Array(searchTargets.length);
+      const runTargetIndexes = async (indexes, concurrency, attemptNumber) => {
+        let nextIndex = 0;
+        const workers = Array.from({ length: Math.max(1, Math.min(concurrency, indexes.length || 1)) }, async () => {
+          while (true) {
+            const listIndex = nextIndex;
+            nextIndex += 1;
+            if (listIndex >= indexes.length) {
+              return;
+            }
 
-      let nextIndex = 0;
-      const workers = Array.from({ length: boundedWorkers }, async () => {
-        while (true) {
-          const currentIndex = nextIndex;
-          nextIndex += 1;
-          if (currentIndex >= searchTargets.length) {
-            return;
+            const targetIndex = indexes[listIndex];
+            const target = searchTargets[targetIndex];
+            if (attemptNumber > 1) {
+              console.log(`RETRY ${attemptNumber - 1}/2 ${formatSearchTarget(target)} -> ${outcomes[targetIndex]?.error?.message || "failed"}`);
+              await delay(1000 * attemptNumber + Math.floor(Math.random() * 500));
+            }
+            outcomes[targetIndex] = {
+              ...await this.runSingleLocation(browser, target),
+              attemptCount: attemptNumber
+            };
           }
+        });
+        await Promise.all(workers);
+      };
 
-          const target = searchTargets[currentIndex];
-          let outcome = await this.runSingleLocation(browser, target);
-          if (!outcome.ok && shouldRetryLocationOutcome(outcome)) {
-            console.log(`RETRY ${formatSearchTarget(target)} -> ${outcome.error.message}`);
-            await delay(1500);
-            outcome = await this.runSingleLocation(browser, target);
-          }
-          outcomes[currentIndex] = outcome;
+      await runTargetIndexes(searchTargets.map((_, index) => index), boundedWorkers, 1);
+      for (let attemptNumber = 2; attemptNumber <= 3; attemptNumber += 1) {
+        const retryIndexes = outcomes
+          .map((outcome, index) => ({ outcome, index }))
+          .filter(({ outcome }) => outcome && !outcome.ok && shouldRetryLocationOutcome(outcome))
+          .map(({ index }) => index);
+        if (!retryIndexes.length) {
+          break;
         }
-      });
-
-      await Promise.all(workers);
+        await runTargetIndexes(retryIndexes, 2, attemptNumber);
+      }
 
       for (let index = 0; index < searchTargets.length; index += 1) {
         const target = searchTargets[index];
         const outcome = outcomes[index];
         const targetLabel = formatSearchTarget(target);
         if (!outcome) {
-          failures.push(searchTargetFailure(target, "Unknown scraper failure."));
+          failures.push(searchTargetFailure(target, "Unknown scraper failure.", 1));
           console.log(`ERR ${targetLabel} -> Unknown scraper failure.`);
           continue;
         }
@@ -149,14 +167,27 @@ class RentCarsScraper {
           continue;
         }
 
-        failures.push(searchTargetFailure(target, outcome.error.message));
+        failures.push(searchTargetFailure(target, outcome.error.message, outcome.attemptCount));
         console.log(`ERR ${targetLabel} -> ${outcome.error.message}`);
       }
     } finally {
       await closeBrowserWithTimeout(browser);
     }
 
-    return { results, failures };
+    return {
+      results,
+      failures,
+      expectedTargets: searchTargets.map((target) => ({
+        requestedLocation: target.requestedLocation,
+        location: target.location,
+        pickupLocationId: target.value || "",
+        sortOrder: target.sortOrder,
+        sortLabel: target.sortLabel,
+        priceMode: target.priceMode
+      })),
+      successfulCheckCount: outcomes.filter((outcome) => outcome?.ok).length,
+      failedCheckCount: failures.length
+    };
   }
 
   resolveLaunchOptions() {
@@ -328,7 +359,7 @@ class RentCarsScraper {
       await this.captureFailureArtifacts(page, target);
       return { ok: false, error };
     } finally {
-      await context.close();
+      await context.close().catch(() => {});
     }
   }
 
@@ -1660,7 +1691,7 @@ class RentCarsScraper {
       candidate.rating?.average
     ]);
 
-    const parsedMoney = firstMoney([
+    const basePriceMoney = firstMoney([
       candidate.totalPrice,
       candidate.price,
       candidate.price?.formatted,
@@ -1681,6 +1712,27 @@ class RentCarsScraper {
       candidate.total_price,
       candidate.amount_total
     ]);
+    const protectedPriceMoney = firstMoney([
+      candidate.protectedPrice,
+      candidate.protectionPrice,
+      candidate.insuredPrice,
+      candidate.priceWithProtection,
+      candidate.priceWithInsurance,
+      candidate.totalPriceWithProtection,
+      candidate.totalPriceWithInsurance,
+      candidate.prices?.protected,
+      candidate.prices?.withProtection,
+      candidate.prices?.withInsurance,
+      candidate.prices?.insurance,
+      candidate.pricing?.protected,
+      candidate.pricing?.withProtection,
+      candidate.pricing?.withInsurance,
+      candidate.protection?.total,
+      candidate.insurance?.total
+    ]);
+    const parsedMoney = target.priceMode === "insurance"
+      ? protectedPriceMoney
+      : basePriceMoney || protectedPriceMoney;
 
     if (!provider || !parsedMoney) {
       return null;
@@ -1723,6 +1775,9 @@ class RentCarsScraper {
       providerRating,
       totalPrice: parsedMoney.value,
       currency: normalizeCurrency(parsedMoney.currency),
+      basePrice: basePriceMoney?.value ?? null,
+      protectedPrice: protectedPriceMoney?.value ?? null,
+      priceVerified: target.priceMode !== "insurance" || protectedPriceMoney != null,
       location,
       requestedLocation: target.requestedLocation,
       pickupLocation: target.location,
@@ -1811,7 +1866,7 @@ class RentCarsScraper {
           item.querySelector(".with-protection .total-price")?.textContent ||
           "";
         const priceText = targetData.priceMode === "insurance"
-          ? protectedPriceText || basePriceText
+          ? protectedPriceText
           : basePriceText || protectedPriceText;
 
         let companyName = "";
@@ -1926,6 +1981,7 @@ class RentCarsScraper {
         currency: normalizeCurrency(money.currency),
         basePrice: parseMoney(candidate.basePriceText)?.value ?? null,
         protectedPrice: parseMoney(candidate.protectedPriceText)?.value ?? null,
+        priceVerified: candidate.priceMode !== "insurance" || Boolean(candidate.protectedPriceText),
         location: normalizeWhitespace(candidate.location) || target.location,
         requestedLocation: normalizeWhitespace(candidate.requestedLocation) || target.requestedLocation,
         pickupLocation: target.location,
@@ -2231,6 +2287,7 @@ function dedupeOffers(offers) {
       sortLabel: normalizeWhitespace(offer.sortLabel),
       priceMode: normalizeWhitespace(offer.priceMode),
       transmission: normalizeTransmission(offer.transmission),
+      priceVerified: offer.priceVerified === true,
       offerRank: Number.isFinite(offer.offerRank) ? Number(offer.offerRank) : null
     });
   }
@@ -2242,6 +2299,9 @@ function isUsableRentCarsOffer(offer) {
   const provider = normalizeRentCarsProviderName(offer?.provider);
   const totalPrice = Number(offer?.totalPrice);
   if (!provider || !Number.isFinite(totalPrice) || totalPrice <= 0) {
+    return false;
+  }
+  if (normalizeWhitespace(offer?.priceMode).toLowerCase() === "insurance" && offer?.priceVerified !== true) {
     return false;
   }
 
@@ -2282,6 +2342,7 @@ function selectBestOffersByProvider(offers, targetInput, maxProviders, forcedPro
       currency: normalizeCurrency(offer.currency),
       basePrice: Number.isFinite(offer.basePrice) ? Number(offer.basePrice) : null,
       protectedPrice: Number.isFinite(offer.protectedPrice) ? Number(offer.protectedPrice) : null,
+      priceVerified: offer.priceVerified === true,
       location: normalizeWhitespace(offer.location || target.location),
       requestedLocation: normalizeWhitespace(offer.requestedLocation || target.requestedLocation),
       pickupLocation: normalizeWhitespace(offer.pickupLocation || target.location),
@@ -2388,7 +2449,7 @@ function makeLocationTarget(input, option = null) {
   };
 }
 
-function searchTargetFailure(targetInput, error) {
+function searchTargetFailure(targetInput, error, attemptCount = 1) {
   const target = makeLocationTarget(targetInput);
   return {
     location: target.location,
@@ -2398,6 +2459,7 @@ function searchTargetFailure(targetInput, error) {
     sortOrder: target.sortOrder,
     sortLabel: target.sortLabel,
     priceMode: target.priceMode,
+    attemptCount,
     error
   };
 }
@@ -2460,33 +2522,15 @@ function makeStaticAirportLocationTargets(requestedLocations) {
   return targets;
 }
 
-const AIRPORT_LOCATION_FALLBACKS = {
-  warszawa: [
-    "Warszawa, Lotnisko-Modlin",
-    "Warszawa, Lotnisko-Ok\u0119cie"
-  ],
-  krakow: ["Krak\u00f3w, Lotnisko-Balice"],
-  gdansk: ["Gda\u0144sk, Lotnisko-R\u0119biechowo"],
-  katowice: ["Katowice, Lotnisko-Pyrzowice"],
-  wroclaw: ["Wroc\u0142aw, Lotnisko-Strachowice"],
-  poznan: ["Pozna\u0144, Lotnisko-\u0141awica"],
-  bydgoszcz: ["Bydgoszcz, Lotnisko-Szwederowo"],
-  lodz: ["\u0141\u00f3d\u017a, Lotnisko-Lublinek"]
-};
+const AIRPORT_LOCATION_FALLBACKS = Object.fromEntries(locationCatalog.map((entry) => [
+  normalizeLocationKey(entry.city),
+  entry.airports.map((airport) => airport.label)
+]));
 
-const STATIC_AIRPORT_LOCATION_TARGETS = {
-  warszawa: [
-    { label: "Warszawa, Lotnisko-Modlin", value: "47" },
-    { label: "Warszawa, Lotnisko-Ok\u0119cie", value: "1" }
-  ],
-  krakow: [{ label: "Krak\u00f3w, Lotnisko-Balice", value: "2" }],
-  gdansk: [{ label: "Gda\u0144sk, Lotnisko-R\u0119biechowo", value: "76" }],
-  katowice: [{ label: "Katowice, Lotnisko-Pyrzowice", value: "3" }],
-  wroclaw: [{ label: "Wroc\u0142aw, Lotnisko-Strachowice", value: "5" }],
-  poznan: [{ label: "Pozna\u0144, Lotnisko-\u0141awica", value: "57" }],
-  bydgoszcz: [{ label: "Bydgoszcz, Lotnisko-Szwederowo", value: "56" }],
-  lodz: [{ label: "\u0141\u00f3d\u017a, Lotnisko-Lublinek", value: "55" }]
-};
+const STATIC_AIRPORT_LOCATION_TARGETS = Object.fromEntries(locationCatalog.map((entry) => [
+  normalizeLocationKey(entry.city),
+  entry.airports.map((airport) => ({ label: airport.label, value: airport.id }))
+]));
 
 function isRentCarsAirportOption(option) {
   const label = normalizeForMatch(option?.label || option);
@@ -2681,5 +2725,6 @@ function normalizeCountryCode(value) {
 module.exports = {
   RentCarsScraper,
   filterOffersByTransmissionPreference,
-  findRentCarsLocationMatches
+  findRentCarsLocationMatches,
+  shouldRetryLocationOutcome
 };

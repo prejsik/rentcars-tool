@@ -4,6 +4,7 @@ const path = require("path");
 const { loadConfig, printHelp: printConfigHelp } = require("./config");
 const { RentCarsScraper } = require("./scraper");
 const { dailyPrice, normalizeWhitespace, writeTextFile } = require("./utils");
+const { expectedAirportCount } = require("./locations");
 
 function parseRunnerArgs(argv) {
   const runner = {
@@ -111,6 +112,8 @@ function normalizeTransmissionName(value) {
 function mapOffer(row, scenario) {
   const pickupLocation = row.pickupLocation || row.location;
   const totalPrice = Number(row.totalPrice);
+  const basePrice = Number.isFinite(Number(row.basePrice)) ? Number(row.basePrice) : null;
+  const insuredPrice = Number.isFinite(Number(row.protectedPrice)) ? Number(row.protectedPrice) : null;
   return {
     location: pickupLocation,
     requested_location: row.requestedLocation || row.location,
@@ -123,6 +126,12 @@ function mapOffer(row, scenario) {
     provider_name: normalizeProviderName(row.provider),
     provider_rating: Number.isFinite(row.providerRating) ? row.providerRating : null,
     total_price: totalPrice,
+    base_price: basePrice,
+    insured_price: insuredPrice,
+    insurance_surcharge: basePrice != null && insuredPrice != null
+      ? Number((insuredPrice - basePrice).toFixed(2))
+      : null,
+    price_verified: row.priceVerified === true,
     daily_price: dailyPrice(totalPrice, scenario.durationDays),
     currency: normalizeCurrency(row.currency),
     rental_days: scenario.durationDays,
@@ -176,7 +185,7 @@ function groupTopOffersByLocation(results, sortOrders) {
   return top3ByLocation;
 }
 
-function buildScenarioPayload({ config, scenarioConfig, durationDays, results, failures }) {
+function buildScenarioPayload({ config, scenarioConfig, durationDays, results, failures, expectedTargets = [] }) {
   const mappedResults = results
     .map((row) => mapOffer(row, {
       durationDays,
@@ -207,6 +216,23 @@ function buildScenarioPayload({ config, scenarioConfig, durationDays, results, f
     };
   }
 
+  const normalizedExpectedTargets = expectedTargets.map((target) => ({
+    requested_location: target.requestedLocation || target.location || "",
+    location: target.location || "",
+    pickup_location_id: target.pickupLocationId || "",
+    sort_order: target.sortOrder || "",
+    sort_label: target.sortLabel || "",
+    price_mode: target.priceMode || ""
+  }));
+  const expectedLocations = [...new Set(normalizedExpectedTargets
+    .map((target) => normalizeWhitespace(target.location))
+    .filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+  const failedCheckCount = failures.length;
+  const expectedCheckCount = normalizedExpectedTargets.length
+    || new Set(mappedResults.map((row) => `${row.pickup_location}|${row.sort_order}`)).size + failedCheckCount;
+  const successfulCheckCount = Math.max(0, expectedCheckCount - failedCheckCount);
+
   return {
     scenario_id: `${scenarioConfig.pickupDate}-${durationDays}`,
     start_date: scenarioConfig.pickupDate,
@@ -214,6 +240,13 @@ function buildScenarioPayload({ config, scenarioConfig, durationDays, results, f
     pickup_date: toIsoLocalDateTime(scenarioConfig.pickupDate, scenarioConfig.pickupTime),
     dropoff_date: toIsoLocalDateTime(scenarioConfig.dropoffDate, scenarioConfig.dropoffTime),
     rental_days: durationDays,
+    expected_locations: expectedLocations,
+    expected_targets: normalizedExpectedTargets,
+    expected_check_count: expectedCheckCount,
+    completed_check_count: successfulCheckCount + failedCheckCount,
+    successful_check_count: successfulCheckCount,
+    failed_check_count: failedCheckCount,
+    run_status: failedCheckCount > 0 ? "complete_with_errors" : "complete",
     sort_orders: sortOrders.map((order) => ({
       order,
       label: sortOrderLabel(order)
@@ -224,6 +257,7 @@ function buildScenarioPayload({ config, scenarioConfig, durationDays, results, f
       requested_location: failure.requestedLocation || failure.location,
       sort_order: failure.sortOrder || "",
       sort_label: failure.sortLabel || "",
+      attempt_count: Number(failure.attemptCount) || 1,
       error: failure.error
     })),
     cheapest_by_location: cheapestByLocation,
@@ -233,7 +267,30 @@ function buildScenarioPayload({ config, scenarioConfig, durationDays, results, f
   };
 }
 
-function buildRootPayload({ config, scenarios, startedAt, durationMs, expectedScenarioCount = scenarios.length }) {
+function buildRootPayload({
+  config,
+  scenarios,
+  startedAt,
+  durationMs,
+  expectedScenarioCount = scenarios.length,
+  expectedCheckCount = scenarios.reduce((sum, scenario) => sum + Number(scenario.expected_check_count || 0), 0)
+}) {
+  const successfulCheckCount = scenarios.reduce(
+    (sum, scenario) => sum + Number(scenario.successful_check_count || 0),
+    0
+  );
+  const failedCheckCount = scenarios.reduce(
+    (sum, scenario) => sum + Number(scenario.failed_check_count ?? scenario.errors?.length ?? 0),
+    0
+  );
+  const completedCheckCount = successfulCheckCount + failedCheckCount;
+  const isPartial = scenarios.length < expectedScenarioCount || completedCheckCount < expectedCheckCount;
+  const runStatus = isPartial
+    ? "partial"
+    : failedCheckCount > 0
+      ? "complete_with_errors"
+      : "complete";
+
   return {
     generated_at: new Date().toISOString(),
     scraper: "rentcars",
@@ -244,7 +301,14 @@ function buildRootPayload({ config, scenarios, startedAt, durationMs, expectedSc
     scenario_count: scenarios.length,
     expected_scenario_count: expectedScenarioCount,
     completed_scenario_count: scenarios.length,
-    is_partial: scenarios.length < expectedScenarioCount,
+    expected_check_count: expectedCheckCount,
+    completed_check_count: completedCheckCount,
+    successful_check_count: successfulCheckCount,
+    failed_check_count: failedCheckCount,
+    missing_check_count: Math.max(0, expectedCheckCount - completedCheckCount),
+    run_status: runStatus,
+    has_errors: failedCheckCount > 0,
+    is_partial: isPartial,
     execution_duration_ms: durationMs,
     execution_started_at: startedAt,
     scenarios
@@ -298,6 +362,23 @@ function writePayloadSnapshot(runner, payload, jsonOnly) {
   }
 }
 
+function formatProgressDuration(milliseconds) {
+  const totalSeconds = Math.max(0, Math.round(Number(milliseconds) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours ? `${hours}h` : "", minutes || hours ? `${minutes}m` : "", `${seconds}s`]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function progressLine(completed, total, elapsedMs) {
+  const remaining = Math.max(0, total - completed);
+  const etaMs = completed > 0 ? (elapsedMs / completed) * remaining : 0;
+  const percent = total > 0 ? Math.round((completed / total) * 100) : 100;
+  return `PROGRESS ${completed}/${total} (${percent}%) | elapsed ${formatProgressDuration(elapsedMs)} | ETA ${formatProgressDuration(etaMs)}`;
+}
+
 async function main() {
   const startedAt = new Date().toISOString();
   const startedAtMs = Date.now();
@@ -312,6 +393,9 @@ async function main() {
 
   const scenarios = [];
   const expectedScenarioCount = config.pickupDateOptions.length * config.durationDays.length;
+  const expectedCheckCount = expectedScenarioCount
+    * expectedAirportCount(config.locations)
+    * Math.max(1, config.sortOrders.length);
 
   for (const pickupDate of config.pickupDateOptions) {
     for (const durationDays of config.durationDays) {
@@ -328,22 +412,27 @@ async function main() {
       }
 
       const scraper = new RentCarsScraper(scenarioConfig);
-      const { results, failures } = await scraper.run();
+      const { results, failures, expectedTargets } = await scraper.run();
       const scenarioPayload = buildScenarioPayload({
         config,
         scenarioConfig,
         durationDays,
         results,
-        failures
+        failures,
+        expectedTargets
       });
 
       scenarios.push(scenarioPayload);
+      if (!runner.jsonOnly) {
+        console.log(progressLine(scenarios.length, expectedScenarioCount, Date.now() - startedAtMs));
+      }
       writePayloadSnapshot(runner, buildRootPayload({
         config,
         scenarios,
         startedAt,
         durationMs: Date.now() - startedAtMs,
-        expectedScenarioCount
+        expectedScenarioCount,
+        expectedCheckCount
       }), runner.jsonOnly);
 
       if (!runner.jsonOnly) {
@@ -361,7 +450,8 @@ async function main() {
     scenarios,
     startedAt,
     durationMs: Date.now() - startedAtMs,
-    expectedScenarioCount
+    expectedScenarioCount,
+    expectedCheckCount
   });
 
   if (runner.jsonOnly) {
@@ -388,5 +478,6 @@ if (require.main === module) {
 module.exports = {
   buildRootPayload,
   buildScenarioPayload,
-  parseRunnerArgs
+  parseRunnerArgs,
+  progressLine
 };

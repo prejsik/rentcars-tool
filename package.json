@@ -8,9 +8,11 @@
     "rentcars:json": "node src/rentcars/run.js --config rentcars.config.example.json --save=output/rentcars-results-latest.json",
     "rentcars:merge": "node src/rentcars/mergeResults.js --input-dir downloaded-parts --output-json output/rentcars-results-latest.json",
     "rentcars:report": "node src/rentcars/reportHtml.js output/rentcars-results-latest.json output/rentcars-report.html",
+    "rentcars:xlsx": "node src/rentcars/reportXlsx.js output/rentcars-results-latest.json output/rentcars-summary.xlsx",
     "test": "node tests/run-rentcars-tests.js"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "playwright": "^1.52.0"
   }
 }

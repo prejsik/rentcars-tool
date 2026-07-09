@@ -1,0 +1,77 @@
+name: RentCars push smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rentcars-*.yml"
+      - "src/rentcars/**"
+      - "rentcars.config.example.json"
+      - "package.json"
+      - "package-lock.json"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: One-day RentCars.pl smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run one-day smoke scraper
+        id: scraper
+        shell: bash
+        run: |
+          mkdir -p output
+          start_date="$(TZ=Europe/Warsaw date -d tomorrow +%F)"
+          set +e
+          timeout --kill-after=30s 45m node src/rentcars/run.js \
+            --config rentcars.config.example.json \
+            --start-dates="$start_date" \
+            --durations-days=2 \
+            --sort-orders=price_insurance \
+            --speed-mode=fast \
+            --location-concurrency=2 \
+            --timeout-ms=30000 \
+            --output-json output/rentcars-smoke.json \
+            > >(tee output/rentcars-smoke-log.txt) \
+            2> >(tee output/rentcars-smoke-error.txt >&2)
+          scraper_status=$?
+          set -e
+
+          if [[ -f output/rentcars-smoke.json ]]; then
+            node src/rentcars/reportHtml.js output/rentcars-smoke.json output/rentcars-smoke.html
+          fi
+          exit "$scraper_status"
+
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rentcars-smoke-${{ github.run_number }}
+          path: |
+            output/rentcars-smoke.json
+            output/rentcars-smoke.html
+            output/rentcars-smoke-log.txt
+            output/rentcars-smoke-error.txt
+            artifacts/rentcars/**
+          if-no-files-found: warn
+          retention-days: 7

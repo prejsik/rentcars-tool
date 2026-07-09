@@ -1,0 +1,51 @@
+[
+  {
+    "city": "Warszawa",
+    "airports": [
+      { "label": "Warszawa, Lotnisko-Modlin", "id": "47" },
+      { "label": "Warszawa, Lotnisko-Okęcie", "id": "1" }
+    ]
+  },
+  {
+    "city": "Krakow",
+    "airports": [
+      { "label": "Kraków, Lotnisko-Balice", "id": "2" }
+    ]
+  },
+  {
+    "city": "Gdansk",
+    "airports": [
+      { "label": "Gdańsk, Lotnisko-Rębiechowo", "id": "76" }
+    ]
+  },
+  {
+    "city": "Katowice",
+    "airports": [
+      { "label": "Katowice, Lotnisko-Pyrzowice", "id": "3" }
+    ]
+  },
+  {
+    "city": "Wroclaw",
+    "airports": [
+      { "label": "Wrocław, Lotnisko-Strachowice", "id": "5" }
+    ]
+  },
+  {
+    "city": "Poznan",
+    "airports": [
+      { "label": "Poznań, Lotnisko-Ławica", "id": "57" }
+    ]
+  },
+  {
+    "city": "Bydgoszcz",
+    "airports": [
+      { "label": "Bydgoszcz, Lotnisko-Szwederowo", "id": "56" }
+    ]
+  },
+  {
+    "city": "Lodz",
+    "airports": [
+      { "label": "Łódź, Lotnisko-Lublinek", "id": "55" }
+    ]
+  }
+]
