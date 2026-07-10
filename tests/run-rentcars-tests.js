@@ -513,6 +513,16 @@ runTest("push smoke cannot deploy Pages or notify Telegram", () => {
   assert.doesNotMatch(smoke, /deploy-pages|Notify Telegram|github-pages/i);
 });
 
+runTest("daily merge installs dependencies before generating the Excel summary", () => {
+  const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
+  const mergeJob = daily.slice(daily.indexOf("  merge:"));
+  const installIndex = mergeJob.indexOf("run: npm ci");
+  const workbookIndex = mergeJob.indexOf("Generate RentCars.pl Excel summary");
+
+  assert.ok(installIndex >= 0);
+  assert.ok(workbookIndex > installIndex);
+});
+
 runTest("Excel summary contains all pricing and data-quality sheets", () => {
   const workbook = buildWorkbook({
     generated_at: "2026-07-09T12:00:00.000Z",
