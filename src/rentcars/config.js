@@ -220,7 +220,7 @@ function parseSortOrdersInput(rawValue, fieldName) {
 }
 
 function parseTransmissionInput(rawValue, fieldName) {
-  const normalized = normalizeWhitespace(rawValue ?? "automatic")
+  const normalized = normalizeWhitespace(rawValue ?? "any")
     .toLowerCase()
     .replace(/[_-]+/g, " ");
   const aliases = new Map([
@@ -497,7 +497,7 @@ function loadConfig(argv) {
       "locationConcurrency"
     ) || 1,
     transmission: parseTransmissionInput(
-      configValue(cli, fileConfig, ["transmission", "gearbox", "gearbox-type"], "automatic"),
+      configValue(cli, fileConfig, ["transmission", "gearbox", "gearbox-type"], "any"),
       "transmission"
     ),
     headless: configValue(cli, fileConfig, ["headless"], true) !== false,

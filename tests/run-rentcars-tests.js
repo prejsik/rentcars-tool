@@ -7,6 +7,7 @@ const {
   RentCarsScraper,
   filterOffersByTransmissionPreference,
   findRentCarsLocationMatches,
+  selectBestOffersForTransmissionViews,
   shouldRetryLocationOutcome
 } = require("../src/rentcars/scraper");
 const { buildHtmlReport } = require("../src/rentcars/reportHtml");
@@ -50,7 +51,7 @@ runTest("loadConfig uses RentCars defaults and output folders", () => {
   assert.equal(config.baseUrl, "https://rentcars.pl");
   assert.deepEqual(config.locations, ["Warszawa"]);
   assert.deepEqual(config.sortOrders, ["price_insurance"]);
-  assert.equal(config.transmission, "automatic");
+  assert.equal(config.transmission, "any");
   assert.equal(config.maxAdditionalResultPages, 1);
   assert.match(config.outputCsv, /rentcars-results-/);
   assert.match(config.artifactsDir, /artifacts[\\/]rentcars$/);
@@ -139,7 +140,7 @@ runTest("CLI max additional result pages overrides config", () => {
   assert.equal(config.maxAdditionalResultPages, 2);
 });
 
-runTest("CLI transmission can override default automatic filtering", () => {
+runTest("CLI transmission accepts the all-cars mode", () => {
   const config = loadConfig([
     "--config=rentcars.config.example.json",
     "--locations=Warszawa",
@@ -192,6 +193,43 @@ runTest("automatic transmission filtering keeps unknown offers when no automatic
   ], "automatic");
 
   assert.deepEqual(offers.map((offer) => offer.provider), ["B", "C"]);
+});
+
+runTest("all-cars collection preserves a provider's cheapest offer per transmission", () => {
+  const offers = selectBestOffersForTransmissionViews([
+    { provider: "A", totalPrice: 100, transmission: "manual", priceVerified: true },
+    { provider: "A", totalPrice: 120, transmission: "automatic", priceVerified: true },
+    { provider: "B", totalPrice: 110, transmission: "automatic", priceVerified: true }
+  ], {
+    location: "Warszawa, Lotnisko-Okecie",
+    sortOrder: "price_insurance",
+    priceMode: "insurance"
+  }, 25, []);
+
+  assert.deepEqual(
+    offers.map((offer) => [offer.provider, offer.totalPrice, offer.transmission]),
+    [
+      ["A", 100, "manual"],
+      ["B", 110, "automatic"],
+      ["A", 120, "automatic"]
+    ]
+  );
+});
+
+runTest("all-cars collection keeps automatic leaders outside the all-cars provider limit", () => {
+  const offers = selectBestOffersForTransmissionViews([
+    { provider: "Manual Leader", totalPrice: 100, transmission: "manual", priceVerified: true },
+    { provider: "Automatic Leader", totalPrice: 110, transmission: "automatic", priceVerified: true }
+  ], {
+    location: "Warszawa, Lotnisko-Okecie",
+    sortOrder: "price_insurance",
+    priceMode: "insurance"
+  }, 1, []);
+
+  assert.deepEqual(
+    offers.map((offer) => offer.provider),
+    ["Manual Leader", "Automatic Leader"]
+  );
 });
 
 runTest("transient RentCars form failures are eligible for retry", () => {
@@ -308,18 +346,63 @@ runTest("buildHtmlReport renders RentCars title and top offer columns", () => {
   });
 
   assert.match(html, /RentCars\.pl report/);
-  assert.match(html, /top1_offer/);
-  assert.match(html, /top1_daily_price/);
+  assert.match(html, /Top 1 firma/);
+  assert.match(html, /Top 1 PLN\/d/);
   assert.match(html, /TM Flota \(5\)/);
   assert.match(html, /99\.50 PLN\/day/);
   assert.match(html, /Warszawa, Centrum/);
   assert.match(html, /MM Cars Rental \(4\.5\)/);
-  assert.match(html, /class="mm/);
+  assert.match(html, /offer-view-(?:automatic|all) mm/);
   assert.match(html, /\.mm-close \{\s+background: var\(--red-bg\);/);
   assert.match(html, /\.mm-top1-gap \{\s+background: var\(--blue-bg\);/);
-  assert.match(html, /more than 10 PLN\/day/);
+  assert.match(html, /Top1: \+10 PLN\/d/);
+  assert.match(html, /Top1: \+20 PLN\/d/);
+  assert.match(html, /Top1: \+30 PLN\/d/);
   assert.match(html, /Execution duration: 1m 1s \(61000 ms\)/);
   assert.doesNotMatch(html, /Toyota Aygo/);
+});
+
+runTest("buildHtmlReport switches between all cars and automatics and opens with all cars", () => {
+  const html = buildHtmlReport({
+    locations: ["Warszawa"],
+    scenarios: [{
+      scenario_id: "2026-07-12-2",
+      start_day_label: "2026-07-12",
+      pickup_date: "2026-07-12T10:00:00",
+      dropoff_date: "2026-07-14T10:00:00",
+      rental_days: 2,
+      expected_locations: ["Warszawa, Lotnisko-Okecie"],
+      sort_orders: [{ order: "price_insurance", label: "po cenie z ubezpieczeniem" }],
+      results: [
+        { pickup_location: "Warszawa, Lotnisko-Okecie", sort_order: "price_insurance", provider_name: "Manual One", total_price: 180, currency: "PLN", rental_days: 2, transmission: "manual" },
+        { pickup_location: "Warszawa, Lotnisko-Okecie", sort_order: "price_insurance", provider_name: "Automatic One", total_price: 200, currency: "PLN", rental_days: 2, transmission: "automatic" },
+        { pickup_location: "Warszawa, Lotnisko-Okecie", sort_order: "price_insurance", provider_name: "MM Cars Rental", total_price: 220, currency: "PLN", rental_days: 2, transmission: "automatic" }
+      ]
+    }]
+  });
+
+  assert.match(html, /<body data-offer-view="all">/);
+  assert.match(html, /id="filter-transmission"/);
+  assert.match(html, /id="filter-location-type"/);
+  assert.match(html, /id="filter-date"/);
+  assert.match(html, /id="filter-location"/);
+  assert.match(html, /id="filter-duration"/);
+  assert.match(html, /id="filter-state"/);
+  assert.match(html, /id="filter-top1"/);
+  assert.match(html, /<details class="multi-filter" id="filter-location"/);
+  assert.match(html, /<details class="multi-filter" id="filter-duration"/);
+  assert.match(html, /<details class="multi-filter" id="filter-state"/);
+  assert.match(html, /<details class="multi-filter" id="filter-top1"/);
+  assert.match(html, /input type="checkbox" value="2"/);
+  assert.match(html, /selectedValues\(control\)/);
+  assert.match(html, /<option value="all">Wszystkie auta<\/option>\s*<option value="automatic">Tylko automaty<\/option>/);
+  assert.match(html, /offer-view-all">Manual One<\/span>/);
+  assert.match(html, /offer-view-automatic">Automatic One<\/span>/);
+  assert.doesNotMatch(html, /offer-view-automatic">Manual One<\/span>/);
+  assert.match(html, /offer-view-automatic rank-cell">Top 2<\/span>/);
+  assert.match(html, /offer-view-all rank-cell">Top 3<\/span>/);
+  assert.match(html, /data-date="2026-07-12" data-duration="2"/);
+  assert.match(html, /data-mm-state-automatic="close" data-mm-state-all="close"/);
 });
 
 runTest("buildHtmlReport marks MM Cars Rental top1 when top2 is more than 10 PLN per day higher", () => {
@@ -358,8 +441,8 @@ runTest("buildHtmlReport marks MM Cars Rental top1 when top2 is more than 10 PLN
     ]
   });
 
-  assert.match(html, /class="mm mm-top1-gap">MM Cars Rental \(4\.5\)/);
-  assert.match(html, /class="mm mm-top1-gap">99\.00 PLN\/day/);
+  assert.match(html, /offer-view-all mm mm-top1-gap">MM Cars Rental \(4\.5\)/);
+  assert.match(html, /offer-view-all mm mm-top1-gap">99\.00 PLN\/day/);
 });
 
 runTest("buildHtmlReport does not mark MM Cars Rental top1 at exactly 10 PLN per day ahead", () => {
@@ -398,7 +481,31 @@ runTest("buildHtmlReport does not mark MM Cars Rental top1 at exactly 10 PLN per
     ]
   });
 
-  assert.doesNotMatch(html, /<td class="mm mm-top1-gap"/);
+  assert.doesNotMatch(html, /offer-view-(?:automatic|all) mm mm-top1-gap/);
+});
+
+runTest("buildHtmlReport uses the DiscoverCars 30 PLN top1 tier", () => {
+  const html = buildHtmlReport({
+    locations: ["Warszawa"],
+    scenarios: [{
+      start_day_label: "2026-07-12",
+      pickup_date: "2026-07-12T10:00:00",
+      dropoff_date: "2026-07-14T10:00:00",
+      rental_days: 2,
+      sort_orders: [{ order: "price_insurance" }],
+      top_3_by_location: {
+        "Warszawa, Lotnisko-Okecie": {
+          price_insurance: [
+            { provider_name: "MM Cars Rental", total_price: 198, currency: "PLN", rental_days: 2 },
+            { provider_name: "TOPCARS", total_price: 260, currency: "PLN", rental_days: 2 }
+          ]
+        }
+      }
+    }]
+  });
+
+  assert.match(html, /data-mm-state-all="top1-gap-30"/);
+  assert.match(html, /offer-view-all mm mm-top1-gap-30/);
 });
 
 runTest("buildRootPayload and HTML report mark partial scheduled snapshots", () => {

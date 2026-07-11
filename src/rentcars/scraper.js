@@ -331,12 +331,20 @@ class RentCarsScraper {
         throw new Error("No offers could be extracted from the results page.");
       }
 
-      const locationOffers = selectBestOffersByProvider(
-        this.filterOffersForConfiguredTransmission(offers),
-        target,
-        this.config.maxProvidersPerLocation,
-        this.config.focusProviders || []
-      );
+      const filteredOffers = this.filterOffersForConfiguredTransmission(offers);
+      const locationOffers = normalizeTransmissionPreference(this.config.transmission) === "any"
+        ? selectBestOffersForTransmissionViews(
+          filteredOffers,
+          target,
+          this.config.maxProvidersPerLocation,
+          this.config.focusProviders || []
+        )
+        : selectBestOffersByProvider(
+          filteredOffers,
+          target,
+          this.config.maxProvidersPerLocation,
+          this.config.focusProviders || []
+        );
       if (!locationOffers.length) {
         throw new Error("No valid offers with provider and price were extracted.");
       }
@@ -1329,7 +1337,11 @@ class RentCarsScraper {
         ...collector.getOffers(),
         ...accumulatedOffers
       ]);
-      if (countUniqueOfferProviders(this.filterOffersForConfiguredTransmission(combinedOffers)) >= desiredProviders) {
+      const configuredOffers = this.filterOffersForConfiguredTransmission(combinedOffers);
+      const configuredReady = countUniqueOfferProviders(configuredOffers) >= desiredProviders;
+      const automaticReady = normalizeTransmissionPreference(this.config.transmission) !== "any"
+        || countUniqueOfferProviders(filterOffersByTransmissionPreference(combinedOffers, "automatic")) >= desiredProviders;
+      if (configuredReady && automaticReady) {
         return;
       }
 
@@ -2389,6 +2401,29 @@ function selectBestOffersByProvider(offers, targetInput, maxProviders, forcedPro
   return selected.sort(compareOffersForTarget);
 }
 
+function selectBestOffersForTransmissionViews(offers, targetInput, maxProviders, forcedProviderNames) {
+  const allOffers = selectBestOffersByProvider(
+    offers,
+    targetInput,
+    maxProviders,
+    forcedProviderNames
+  );
+  const automaticOffers = selectBestOffersByProvider(
+    offers.filter((offer) => normalizeTransmission(offer.transmission) === "automatic"),
+    targetInput,
+    maxProviders,
+    forcedProviderNames
+  );
+  const selected = new Map();
+  for (const offer of [...allOffers, ...automaticOffers]) {
+    const providerKey = normalizeWhitespace(offer.provider).toLowerCase();
+    const transmission = normalizeTransmission(offer.transmission) || "unknown";
+    selected.set(`${providerKey}\u0000${transmission}`, offer);
+  }
+
+  return [...selected.values()].sort(compareOffersForTarget);
+}
+
 function compareOffersForTarget(left, right) {
   const leftRank = Number.isFinite(left.offerRank) ? left.offerRank : Number.MAX_SAFE_INTEGER;
   const rightRank = Number.isFinite(right.offerRank) ? right.offerRank : Number.MAX_SAFE_INTEGER;
@@ -2726,5 +2761,6 @@ module.exports = {
   RentCarsScraper,
   filterOffersByTransmissionPreference,
   findRentCarsLocationMatches,
+  selectBestOffersForTransmissionViews,
   shouldRetryLocationOutcome
 };

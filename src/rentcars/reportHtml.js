@@ -4,6 +4,9 @@ const { dailyPrice } = require("./utils");
 
 const MM_CLOSE_PRICE_PER_DAY_THRESHOLD_PLN = 10;
 const MM_TOP1_RUNNER_UP_PRICE_PER_DAY_THRESHOLD_PLN = 10;
+const MM_TOP1_GAP_20_PRICE_PER_DAY_THRESHOLD_PLN = 20;
+const MM_TOP1_GAP_30_PRICE_PER_DAY_THRESHOLD_PLN = 30;
+const TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN = 150;
 
 function normalizeProviderName(value) {
   return String(value || "")
@@ -85,44 +88,53 @@ function isMmCloseToHigherRankedProvider(mmOffer, rankedOffers) {
   return false;
 }
 
-function isMmTopRankedWithPricierRunnerUp(mmOffer, rankedOffers) {
+function getMmTop1GapPerDay(mmOffer, rankedOffers) {
   if (!mmOffer || !Number.isFinite(Number(mmOffer.total_price)) || !isPlnOffer(mmOffer)) {
-    return false;
+    return null;
   }
 
   const topOffers = Array.isArray(rankedOffers) ? rankedOffers.filter(Boolean) : [];
   if (!topOffers.length || !isMmCarsProvider(topOffers[0]?.provider_name) || topOffers[0] !== mmOffer) {
-    return false;
+    return null;
   }
 
   const runnerUp = topOffers.find((offer, index) => index > 0 && offer && !isMmCarsProvider(offer.provider_name));
   if (!runnerUp || !Number.isFinite(Number(runnerUp.total_price)) || !isSameCurrency(mmOffer, runnerUp)) {
-    return false;
+    return null;
   }
 
   const priceDifference = Number(runnerUp.total_price) - Number(mmOffer.total_price);
   if (priceDifference <= 0) {
-    return false;
+    return null;
   }
 
   const rentalDays = getRentalDaysForComparison(mmOffer, runnerUp);
-  return priceDifference / rentalDays > MM_TOP1_RUNNER_UP_PRICE_PER_DAY_THRESHOLD_PLN;
+  return priceDifference / rentalDays;
+}
+
+function getMmTop1GapState(mmOffer, rankedOffers) {
+  const gapPerDay = getMmTop1GapPerDay(mmOffer, rankedOffers);
+  if (!Number.isFinite(gapPerDay) || gapPerDay <= MM_TOP1_RUNNER_UP_PRICE_PER_DAY_THRESHOLD_PLN) {
+    return null;
+  }
+  if (gapPerDay >= MM_TOP1_GAP_30_PRICE_PER_DAY_THRESHOLD_PLN) {
+    return "top1-gap-30";
+  }
+  if (gapPerDay >= MM_TOP1_GAP_20_PRICE_PER_DAY_THRESHOLD_PLN) {
+    return "top1-gap-20";
+  }
+  return "top1-gap";
 }
 
 function mmClassName(offer, rankedOffers) {
   if (!isMmCarsProvider(offer?.provider_name)) {
     return "";
   }
-  if (isMmTopRankedWithPricierRunnerUp(offer, rankedOffers)) {
-    return "mm mm-top1-gap";
+  const top1GapState = getMmTop1GapState(offer, rankedOffers);
+  if (top1GapState) {
+    return `mm mm-${top1GapState}`;
   }
   return isMmCloseToHigherRankedProvider(offer, rankedOffers) ? "mm mm-close" : "mm";
-}
-
-function buildProviderCell(offer, rankedOffers) {
-  const className = mmClassName(offer, rankedOffers);
-  const classAttribute = className ? ` class="${className}"` : "";
-  return `<td${classAttribute}>${escapeHtml(formatProviderName(offer))}</td>`;
 }
 
 function formatOfferPrice(offer) {
@@ -138,19 +150,89 @@ function formatOfferPrice(offer) {
   return `${pricePerDay.toFixed(2)} ${offer.currency || ""}/day`.trim();
 }
 
-function buildPriceCell(offer, rankedOffers) {
-  const className = mmClassName(offer, rankedOffers);
-  const classAttribute = className ? ` class="${className}"` : "";
-  return `<td${classAttribute}>${escapeHtml(formatOfferPrice(offer))}</td>`;
+function offerViewSpan(mode, content, className = "") {
+  const classes = ["offer-view", `offer-view-${mode}`, className].filter(Boolean).join(" ");
+  return `<span class="${classes}">${content}</span>`;
 }
 
-function sortOrderLabel(sortOrder) {
-  const labels = {
-    suggested: "sugerowane",
-    price: "po cenie",
-    price_insurance: "po cenie z ubezpieczeniem"
-  };
-  return labels[sortOrder] || sortOrder;
+function buildDualCell(automaticContent, allContent, automaticClass = "", allClass = "") {
+  return `<td class="view-cell">${offerViewSpan("automatic", automaticContent, automaticClass)}${offerViewSpan("all", allContent, allClass)}</td>`;
+}
+
+function rankOffersByProvider(offers) {
+  const byProvider = new Map();
+  for (const offer of offers) {
+    const providerKey = normalizeProviderName(offer?.provider_name);
+    if (!providerKey || !Number.isFinite(Number(offer?.total_price))) {
+      continue;
+    }
+    const existing = byProvider.get(providerKey);
+    if (!existing || Number(offer.total_price) < Number(existing.total_price)) {
+      byProvider.set(providerKey, offer);
+    }
+  }
+  return [...byProvider.values()].sort(
+    (left, right) => Number(left.total_price) - Number(right.total_price)
+  );
+}
+
+function rankedOffersForView(scenarioPayload, location, sortOrder, legacyTop3, mode) {
+  const matchingResults = (Array.isArray(scenarioPayload.results) ? scenarioPayload.results : [])
+    .filter((offer) => {
+      const offerLocation = String(offer.pickup_location || offer.location || "").toLowerCase();
+      const offerSortOrder = offer.sort_order || "suggested";
+      return offerLocation === String(location).toLowerCase() && offerSortOrder === sortOrder;
+    });
+  const sourceOffers = matchingResults.length ? matchingResults : legacyTop3;
+  const hasTransmissionMetadata = sourceOffers.some((offer) =>
+    ["automatic", "manual"].includes(String(offer?.transmission || "").toLowerCase())
+  );
+  const viewOffers = mode === "automatic" && hasTransmissionMetadata
+    ? sourceOffers.filter((offer) => String(offer?.transmission || "").toLowerCase() === "automatic")
+    : sourceOffers;
+  return rankOffersByProvider(viewOffers);
+}
+
+function getMmState(rankedOffers) {
+  const mmOffer = rankedOffers.find((offer) => isMmCarsProvider(offer?.provider_name));
+  if (!mmOffer) {
+    return "missing";
+  }
+  const top1GapState = getMmTop1GapState(mmOffer, rankedOffers);
+  if (top1GapState) {
+    return top1GapState;
+  }
+  return isMmCloseToHigherRankedProvider(mmOffer, rankedOffers) ? "close" : "normal";
+}
+
+function isTop1High(rankedOffers) {
+  const topOffer = rankedOffers[0];
+  const pricePerDay = Number.isFinite(Number(topOffer?.daily_price))
+    ? Number(topOffer.daily_price)
+    : dailyPrice(topOffer?.total_price, topOffer?.rental_days);
+  return Number.isFinite(pricePerDay) && pricePerDay > TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN;
+}
+
+function mmRankLabel(rankedOffers) {
+  const rank = rankedOffers.findIndex((offer) => isMmCarsProvider(offer?.provider_name));
+  return rank >= 0 ? `Top ${rank + 1}` : "Brak MM";
+}
+
+function cheaperOffersLabel(rankedOffers) {
+  const rank = rankedOffers.findIndex((offer) => isMmCarsProvider(offer?.provider_name));
+  return rank >= 0 ? String(rank) : "Brak danych";
+}
+
+function isAirportLocation(location) {
+  return /airport|lotnisko/i.test(String(location || ""));
+}
+
+function scenarioDate(scenarioPayload) {
+  const value = scenarioPayload.start_date
+    || scenarioPayload.start_day_label
+    || scenarioPayload.pickup_date
+    || "";
+  return String(value).slice(0, 10);
 }
 
 function formatDurationMs(value) {
@@ -203,7 +285,10 @@ function buildErrorsHtml(errors) {
   }
 
   const items = errors
-    .map((error) => `<li><strong>${escapeHtml(error.location || "Unknown")}:</strong> ${escapeHtml(error.error || error.message || error)}</li>`)
+    .map((error) => {
+      const attemptText = error.attempt_count ? ` after ${error.attempt_count} attempt(s)` : "";
+      return `<li><strong>${escapeHtml(error.location || "Unknown")}:</strong> Error${escapeHtml(attemptText)}: ${escapeHtml(error.error || error.message || error)}</li>`;
+    })
     .join("\n");
 
   return `<details class="errors"><summary>Errors (${errors.length})</summary><ul>${items}</ul></details>`;
@@ -212,8 +297,6 @@ function buildErrorsHtml(errors) {
 function buildScenarioRows(rootPayload, scenarioPayload) {
   const locations = scenarioLocations(rootPayload, scenarioPayload);
   const tableData = scenarioPayload.top_3_by_location || {};
-  const errors = Array.isArray(scenarioPayload.errors) ? scenarioPayload.errors : [];
-
   const rows = [];
   for (const location of locations) {
     const locationData = tableData[location] || {};
@@ -224,39 +307,38 @@ function buildScenarioRows(rootPayload, scenarioPayload) {
         : Object.keys(locationData);
 
     for (const sortOrder of sortOrders) {
-      const top3 = Array.isArray(locationData)
+      const legacyTop3 = Array.isArray(locationData)
         ? locationData
         : Array.isArray(locationData[sortOrder]) ? locationData[sortOrder] : [];
-      const matchingError = errors.find((error) => {
-        const sameLocation = String(error.location || "").toLowerCase() === String(location).toLowerCase();
-        const errorSortOrder = error.sort_order || "";
-        return sameLocation && (!errorSortOrder || errorSortOrder === sortOrder);
-      });
-      rows.push({ location, sortOrder, top3, error: matchingError || null });
+      const allRanked = rankedOffersForView(scenarioPayload, location, sortOrder, legacyTop3, "all");
+      const automaticRanked = rankedOffersForView(scenarioPayload, location, sortOrder, legacyTop3, "automatic");
+      rows.push({ location, sortOrder, allRanked, automaticRanked });
     }
   }
 
   return rows
     .map((row, index) => {
-      const top3 = row.top3;
+      const allRanked = row.allRanked;
+      const automaticRanked = row.automaticRanked;
+      const allTop3 = allRanked.slice(0, 3);
+      const automaticTop3 = automaticRanked.slice(0, 3);
+      const allMm = allRanked.find((offer) => isMmCarsProvider(offer?.provider_name));
+      const automaticMm = automaticRanked.find((offer) => isMmCarsProvider(offer?.provider_name));
       const rowClass = index % 2 === 0 ? "even" : "odd";
-      const attemptText = row.error?.attempt_count ? ` after ${row.error.attempt_count} attempt(s)` : "";
-      const statusText = row.error
-        ? `Error${attemptText}: ${row.error.error || "Unknown error"}`
-        : top3.length
-          ? "OK"
-          : "No verified offers";
-      return `<tr class="${rowClass}">
+      const allHigh = isTop1High(allRanked);
+      const automaticHigh = isTop1High(automaticRanked);
+      return `<tr class="${rowClass}" data-location="${escapeHtml(row.location)}" data-location-type="${isAirportLocation(row.location) ? "airport" : "branch"}" data-mm-state-automatic="${getMmState(automaticRanked)}" data-mm-state-all="${getMmState(allRanked)}" data-top1-high-automatic="${automaticHigh}" data-top1-high-all="${allHigh}">
         <td class="index">${index}</td>
         <td class="location">${escapeHtml(row.location)}</td>
-        <td>${escapeHtml(sortOrderLabel(row.sortOrder))}</td>
-        <td class="${row.error ? "check-error" : top3.length ? "check-ok" : "check-missing"}">${escapeHtml(statusText)}</td>
-        ${buildProviderCell(top3[0], top3)}
-        ${buildPriceCell(top3[0], top3)}
-        ${buildProviderCell(top3[1], top3)}
-        ${buildPriceCell(top3[1], top3)}
-        ${buildProviderCell(top3[2], top3)}
-        ${buildPriceCell(top3[2], top3)}
+        ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[0])), escapeHtml(formatProviderName(allTop3[0])), mmClassName(automaticTop3[0], automaticTop3), mmClassName(allTop3[0], allTop3))}
+        ${buildDualCell(escapeHtml(formatOfferPrice(automaticTop3[0])), escapeHtml(formatOfferPrice(allTop3[0])), automaticHigh ? "top1-high" : "", allHigh ? "top1-high" : "")}
+        ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[1])), escapeHtml(formatProviderName(allTop3[1])), mmClassName(automaticTop3[1], automaticTop3), mmClassName(allTop3[1], allTop3))}
+        ${buildDualCell(escapeHtml(formatOfferPrice(automaticTop3[1])), escapeHtml(formatOfferPrice(allTop3[1])))}
+        ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[2])), escapeHtml(formatProviderName(allTop3[2])), mmClassName(automaticTop3[2], automaticTop3), mmClassName(allTop3[2], allTop3))}
+        ${buildDualCell(escapeHtml(formatOfferPrice(automaticTop3[2])), escapeHtml(formatOfferPrice(allTop3[2])))}
+        ${buildDualCell(escapeHtml(formatOfferPrice(automaticMm)), escapeHtml(formatOfferPrice(allMm)), automaticMm ? mmClassName(automaticMm, automaticRanked) : "muted", allMm ? mmClassName(allMm, allRanked) : "muted")}
+        ${buildDualCell(escapeHtml(mmRankLabel(automaticRanked)), escapeHtml(mmRankLabel(allRanked)), "rank-cell", "rank-cell")}
+        ${buildDualCell(escapeHtml(cheaperOffersLabel(automaticRanked)), escapeHtml(cheaperOffersLabel(allRanked)), "count-cell", "count-cell")}
       </tr>`;
     })
     .join("\n");
@@ -267,22 +349,36 @@ function buildScenarioTable(rootPayload, scenarioPayload, index, total) {
   const dropoff = scenarioPayload.dropoff_date || "";
   const rentalDays = scenarioPayload.rental_days || "";
 
-  return `<section class="scenario">
+  return `<section class="scenario" data-date="${escapeHtml(scenarioDate(scenarioPayload))}" data-duration="${escapeHtml(rentalDays)}">
     <h2>${escapeHtml(scenarioTitle(scenarioPayload, index, total))}</h2>
     <div class="period">${escapeHtml(`${pickup} -> ${dropoff} (rental_days=${rentalDays})`)}</div>
     <table>
+      <colgroup>
+        <col class="col-index">
+        <col class="col-location">
+        <col class="col-company">
+        <col class="col-rate">
+        <col class="col-company">
+        <col class="col-rate">
+        <col class="col-company">
+        <col class="col-rate">
+        <col class="col-mm-rate">
+        <col class="col-rank">
+        <col class="col-count">
+      </colgroup>
       <thead>
         <tr>
-          <th>(index)</th>
-          <th>location</th>
-          <th>sort_order</th>
-          <th>check_status</th>
-          <th>top1_offer</th>
-          <th>top1_daily_price</th>
-          <th>top2_offer</th>
-          <th>top2_daily_price</th>
-          <th>top3_offer</th>
-          <th>top3_daily_price</th>
+          <th>#</th>
+          <th>Lokalizacja</th>
+          <th>Top 1 firma</th>
+          <th>Top 1 PLN/d</th>
+          <th>Top 2 firma</th>
+          <th>Top 2 PLN/d</th>
+          <th>Top 3 firma</th>
+          <th>Top 3 PLN/d</th>
+          <th>MM PLN/d</th>
+          <th>Pozycja MM</th>
+          <th>Tańsze oferty</th>
         </tr>
       </thead>
       <tbody>
@@ -293,11 +389,62 @@ function buildScenarioTable(rootPayload, scenarioPayload, index, total) {
   </section>`;
 }
 
+function primaryRankingForLocation(scenarioPayload, location, mode) {
+  const locationData = scenarioPayload?.top_3_by_location?.[location] || {};
+  const configuredSortOrder = scenarioPayload?.sort_orders?.[0];
+  const sortOrder = configuredSortOrder?.order
+    || configuredSortOrder
+    || (Array.isArray(locationData) ? "price" : Object.keys(locationData)[0])
+    || "price_insurance";
+  const legacyTop3 = Array.isArray(locationData)
+    ? locationData
+    : Array.isArray(locationData[sortOrder]) ? locationData[sortOrder] : [];
+  return rankedOffersForView(scenarioPayload, location, sortOrder, legacyTop3, mode);
+}
+
+function buildMultiFilter(id, label, options, allLabel = "Wszystkie") {
+  const optionHtml = options
+    .map((option) => `<label class="multi-option"><input type="checkbox" value="${escapeHtml(option.value)}"><span>${escapeHtml(option.label)}</span></label>`)
+    .join("");
+  return `<div class="filter-field"><span class="filter-label">${escapeHtml(label)}</span><details class="multi-filter" id="${escapeHtml(id)}" data-all-label="${escapeHtml(allLabel)}"><summary>${escapeHtml(allLabel)}</summary><div class="multi-options">${optionHtml}</div></details></div>`;
+}
+
 function buildHtmlReport(payload) {
   const scenarios = normalizeScenarios(payload);
   const generatedAt = payload.generated_at || new Date().toISOString();
   const executionStartedAt = payload.execution_started_at || "";
   const executionDuration = formatDurationMs(payload.execution_duration_ms);
+  const locations = [...new Set(scenarios.flatMap((scenario) => scenarioLocations(payload, scenario)))].sort();
+  const durations = [...new Set(scenarios
+    .map((scenario) => Number(scenario.rental_days))
+    .filter(Number.isFinite))].sort((left, right) => left - right);
+  const locationChecks = scenarios.reduce(
+    (sum, scenario) => sum + scenarioLocations(payload, scenario).length,
+    0
+  );
+  const missingMm = scenarios.reduce((sum, scenario) => sum + scenarioLocations(payload, scenario)
+    .filter((location) => !primaryRankingForLocation(scenario, location, "all")
+      .some((offer) => isMmCarsProvider(offer?.provider_name))).length, 0);
+  const errorCount = scenarios.reduce(
+    (sum, scenario) => sum + (Array.isArray(scenario.errors) ? scenario.errors.length : 0),
+    0
+  );
+  const highTop1Count = scenarios.reduce((sum, scenario) => sum + scenarioLocations(payload, scenario)
+    .filter((location) => isTop1High(primaryRankingForLocation(scenario, location, "all"))).length, 0);
+  const locationOptions = locations.map((location) => ({ value: location, label: location }));
+  const durationOptions = durations.map((duration) => ({ value: String(duration), label: `${duration} dni` }));
+  const mmStateOptions = [
+    { value: "missing", label: "Brak MM" },
+    { value: "top1-gap", label: "Top1: różnica 10–19,99 PLN/d" },
+    { value: "top1-gap-20", label: "Top1: różnica 20–29,99 PLN/d" },
+    { value: "top1-gap-30", label: "Top1: różnica min. 30 PLN/d" },
+    { value: "close", label: "Blisko wyższej pozycji" },
+    { value: "normal", label: "Pozostałe" }
+  ];
+  const top1Options = [
+    { value: "high", label: `Powyżej ${TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN} PLN/d` },
+    { value: "normal", label: `Do ${TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN} PLN/d` }
+  ];
   const progressText = Number.isFinite(Number(payload.expected_scenario_count))
     ? `${Number(payload.completed_scenario_count ?? scenarios.length)} / ${Number(payload.expected_scenario_count)} scenarios`
     : `${scenarios.length} scenarios`;
@@ -329,6 +476,10 @@ function buildHtmlReport(payload) {
       --yellow-text: #253040;
       --blue-bg: #1e5bd7;
       --blue-text: #ffffff;
+      --orange-bg: #d96b00;
+      --orange-text: #ffffff;
+      --magenta-bg: #a61e74;
+      --magenta-text: #ffffff;
       --red-bg: #d73535;
       --red-text: #ffffff;
     }
@@ -354,10 +505,17 @@ function buildHtmlReport(payload) {
       font-size: 13px;
     }
 
+    .summary {
+      color: var(--muted);
+      margin-bottom: 14px;
+      font-size: 13px;
+    }
+
     .scenario {
       margin: 0 0 34px;
       padding-top: 8px;
       border-top: 2px solid #2d333b;
+      overflow-x: visible;
     }
 
     h2 {
@@ -377,31 +535,49 @@ function buildHtmlReport(payload) {
       border-collapse: collapse;
       background: #0d0f12;
       border: 2px solid var(--line);
-      table-layout: auto;
+      table-layout: fixed;
     }
+
+    col.col-index { width: 3%; }
+    col.col-location { width: 16%; }
+    col.col-company { width: 11%; }
+    col.col-rate { width: 7%; }
+    col.col-mm-rate { width: 8%; }
+    col.col-rank { width: 8%; }
+    col.col-count { width: 11%; }
 
     th, td {
       border: 2px solid var(--line);
-      padding: 8px 11px;
+      padding: 6px 7px;
       text-align: left;
-      white-space: nowrap;
+      white-space: normal;
       vertical-align: middle;
+      overflow-wrap: anywhere;
+      line-height: 1.25;
     }
 
     th {
       color: var(--text);
       font-weight: 700;
       background: #111;
+      font-size: 11px;
     }
 
     td {
       color: var(--green);
       font-weight: 700;
+      font-size: 12px;
+    }
+
+    th:nth-child(4), th:nth-child(6), th:nth-child(8), th:nth-child(9), th:nth-child(10), th:nth-child(11),
+    td:nth-child(4), td:nth-child(6), td:nth-child(8), td:nth-child(9), td:nth-child(10), td:nth-child(11) {
+      text-align: right;
+      white-space: nowrap;
     }
 
     td.index {
       color: var(--text);
-      width: 72px;
+      text-align: center;
     }
 
     .mm {
@@ -419,20 +595,93 @@ function buildHtmlReport(payload) {
       color: var(--blue-text);
     }
 
+    .mm-top1-gap-20 {
+      background: var(--orange-bg);
+      color: var(--orange-text);
+    }
+
+    .mm-top1-gap-30 {
+      background: var(--magenta-bg);
+      color: var(--magenta-text);
+    }
+
     .legend {
       display: flex;
       flex-wrap: wrap;
-      gap: 16px;
-      margin: 0 0 18px;
+      gap: 10px;
+      margin-bottom: 24px;
       color: var(--muted);
       font-size: 13px;
     }
 
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      gap: 10px;
+      margin: 0 0 18px;
+      padding: 12px 0;
+      border-top: 1px solid #2d333b;
+      border-bottom: 1px solid #2d333b;
+    }
+
+    .toolbar > label, .filter-label { color: var(--muted); font-size: 12px; }
+
+    .toolbar select, .toolbar input[type="date"], .multi-filter > summary {
+      display: block;
+      margin-top: 4px;
+      min-height: 34px;
+      border: 1px solid #596273;
+      border-radius: 4px;
+      background: #11151b;
+      color: var(--text);
+      padding: 5px 8px;
+    }
+
+    .filter-field { min-width: 150px; }
+    .filter-label { display: block; }
+    .multi-filter { position: relative; margin-top: 4px; }
+    .multi-filter > summary {
+      min-width: 150px;
+      cursor: pointer;
+      list-style: none;
+      line-height: 22px;
+    }
+    .multi-filter > summary::-webkit-details-marker { display: none; }
+    .multi-filter > summary::after { content: "▾"; float: right; margin-left: 12px; }
+    .multi-filter[open] > summary::after { content: "▴"; }
+    .multi-options {
+      position: absolute;
+      z-index: 20;
+      top: calc(100% + 4px);
+      left: 0;
+      min-width: 220px;
+      max-width: 340px;
+      max-height: 280px;
+      overflow-y: auto;
+      border: 1px solid #596273;
+      border-radius: 4px;
+      background: #11151b;
+      box-shadow: 0 8px 20px #00000066;
+      padding: 6px;
+    }
+    .multi-option {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 7px 6px;
+      color: var(--text);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .multi-option:hover { background: #242b35; }
+    .multi-option input { flex: 0 0 auto; margin: 1px 0 0; }
+
     .badge {
       display: inline-block;
-      padding: 2px 7px;
-      border: 1px solid var(--line);
-      color: var(--text);
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-weight: 700;
     }
 
     .errors {
@@ -440,12 +689,20 @@ function buildHtmlReport(payload) {
       color: #ffb4a9;
     }
 
-    td.check-ok { color: #8bd49c; }
-    td.check-missing { color: #f5c76b; }
-    td.check-error {
-      color: #ffb4a9;
-      white-space: normal;
-      min-width: 240px;
+    .view-cell { padding: 0; }
+    .offer-view { display: block; padding: 6px 7px; min-height: 100%; }
+    .offer-view-automatic { display: none; }
+    body[data-offer-view="automatic"] .offer-view-all { display: none; }
+    body[data-offer-view="automatic"] .offer-view-automatic { display: block; }
+    .rank-cell, .count-cell { color: var(--text); }
+
+    .top1-high {
+      background: #7a1d1d;
+      color: #ffffff;
+    }
+
+    .muted {
+      color: var(--muted);
     }
 
     .footer {
@@ -472,24 +729,125 @@ function buildHtmlReport(payload) {
       color: #ffd0cc;
     }
 
-    @media (max-width: 980px) {
+    @media (max-width: 1100px) {
       body { padding: 14px; }
-      .scenario { overflow-x: auto; }
-      table { min-width: 900px; }
+      th, td { padding: 5px; }
+      td { font-size: 11px; }
+    }
+
+    @media (max-width: 720px) {
+      body { padding: 10px; }
+      .scenario { margin-bottom: 26px; }
+      table, tbody, tr, td { display: block; width: 100%; }
+      table { border: 0; background: transparent; }
+      colgroup, thead { display: none; }
+      tbody { display: grid; gap: 10px; }
+      tr { border: 1px solid var(--line); background: #0d0f12; }
+      td, td.index,
+      td:nth-child(4), td:nth-child(6), td:nth-child(8), td:nth-child(9), td:nth-child(10), td:nth-child(11) {
+        display: grid;
+        grid-template-columns: minmax(92px, 38%) 1fr;
+        gap: 8px;
+        border: 0;
+        border-bottom: 1px solid #3d434b;
+        padding: 7px 9px;
+        text-align: left;
+        white-space: normal;
+      }
+      td:last-child { border-bottom: 0; }
+      td::before { color: var(--muted); font-weight: 400; }
+      td:nth-child(1)::before { content: "#"; }
+      td:nth-child(2)::before { content: "Lokalizacja"; }
+      td:nth-child(3)::before { content: "Top 1 firma"; }
+      td:nth-child(4)::before { content: "Top 1 PLN/d"; }
+      td:nth-child(5)::before { content: "Top 2 firma"; }
+      td:nth-child(6)::before { content: "Top 2 PLN/d"; }
+      td:nth-child(7)::before { content: "Top 3 firma"; }
+      td:nth-child(8)::before { content: "Top 3 PLN/d"; }
+      td:nth-child(9)::before { content: "MM PLN/d"; }
+      td:nth-child(10)::before { content: "Pozycja MM"; }
+      td:nth-child(11)::before { content: "Tańsze oferty"; }
     }
   </style>
 </head>
-<body>
+<body data-offer-view="all">
   <h1>RentCars.pl report</h1>
   <div class="meta">Generated at: ${escapeHtml(generatedAt)} | Time zone: ${escapeHtml(payload.time_zone || "Europe/Warsaw")} | Source: ${escapeHtml(payload.source_url || "https://rentcars.pl")}</div>
   ${statusNotice}
+  <div class="summary">Scenariusze: ${scenarios.length} | sprawdzenia lokalizacji: ${locationChecks} | brak MM Cars Rental: ${missingMm} | błędy: ${errorCount} | Top1 &gt; ${TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN} PLN/d: ${highTop1Count}</div>
   <div class="legend">
     <span><span class="badge mm">MM Cars Rental</span> MM Cars Rental in table</span>
     <span><span class="badge mm mm-close">MM close</span> MM Cars Rental max 10 PLN/day more expensive than a higher-ranked competitor</span>
-    <span><span class="badge mm mm-top1-gap">MM top1</span> MM Cars Rental top1 and top2 more than 10 PLN/day more expensive</span>
+    <span><span class="badge mm mm-top1-gap">Top1: +10 PLN/d</span> Top 2 jest droższy od MM o ponad 10 PLN/dzień</span>
+    <span><span class="badge mm mm-top1-gap-20">Top1: +20 PLN/d</span> Top 2 jest droższy od MM o min. 20 PLN/dzień</span>
+    <span><span class="badge mm mm-top1-gap-30">Top1: +30 PLN/d</span> Top 2 jest droższy od MM o min. 30 PLN/dzień</span>
+    <span><span class="badge top1-high">Top1 &gt; ${TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN}</span> stawka Top1 przekracza ${TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN} PLN/dzień</span>
+  </div>
+  <div class="toolbar">
+    <label>Skrzynia<select id="filter-transmission"><option value="all">Wszystkie auta</option><option value="automatic">Tylko automaty</option></select></label>
+    <label>Oddziały<select id="filter-location-type"><option value="airport">Lotniska</option><option value="all">Wszystkie oddziały</option></select></label>
+    <label>Data<input id="filter-date" type="date"></label>
+    ${buildMultiFilter("filter-location", "Lokalizacja", locationOptions)}
+    ${buildMultiFilter("filter-duration", "Duration", durationOptions)}
+    ${buildMultiFilter("filter-state", "Stan MM", mmStateOptions)}
+    ${buildMultiFilter("filter-top1", "Kontrola Top1", top1Options)}
   </div>
   ${scenarios.map((scenario, index) => buildScenarioTable(payload, scenario, index, scenarios.length)).join("\n")}
   <div class="footer">Execution started at: ${escapeHtml(executionStartedAt || "Not available")} | Execution duration: ${escapeHtml(executionDuration)}</div>
+  <script>
+    const transmissionControl = document.getElementById("filter-transmission");
+    const locationTypeControl = document.getElementById("filter-location-type");
+    const dateControl = document.getElementById("filter-date");
+    const multiControls = ["filter-location", "filter-duration", "filter-state", "filter-top1"].map((id) => document.getElementById(id));
+    function selectedValues(control) {
+      return new Set(Array.from(control.querySelectorAll("input:checked")).map((input) => input.value));
+    }
+    function updateMultiSummary(control) {
+      const checked = Array.from(control.querySelectorAll("input:checked"));
+      const summary = control.querySelector("summary");
+      if (!checked.length) {
+        summary.textContent = control.dataset.allLabel;
+      } else if (checked.length === 1) {
+        summary.textContent = checked[0].closest("label").querySelector("span").textContent;
+      } else {
+        summary.textContent = checked.length + " wybrane";
+      }
+    }
+    function applyFilters() {
+      const offerView = transmissionControl.value;
+      const locationType = locationTypeControl.value;
+      document.body.dataset.offerView = offerView;
+      const date = dateControl.value;
+      const selectedLocations = selectedValues(multiControls[0]);
+      const selectedDurations = selectedValues(multiControls[1]);
+      const selectedStates = selectedValues(multiControls[2]);
+      const selectedTop1States = selectedValues(multiControls[3]);
+      multiControls.forEach(updateMultiSummary);
+      for (const section of document.querySelectorAll(".scenario")) {
+        const scenarioMatch = (!date || section.dataset.date === date)
+          && (!selectedDurations.size || selectedDurations.has(section.dataset.duration));
+        let visibleRows = 0;
+        for (const row of section.querySelectorAll("tbody tr")) {
+          const mmState = offerView === "all" ? row.dataset.mmStateAll : row.dataset.mmStateAutomatic;
+          const top1High = offerView === "all" ? row.dataset.top1HighAll : row.dataset.top1HighAutomatic;
+          const top1State = top1High === "true" ? "high" : "normal";
+          const top1Match = !selectedTop1States.size || selectedTop1States.has(top1State);
+          const locationTypeMatch = locationType === "all" || row.dataset.locationType === locationType;
+          const locationMatch = !selectedLocations.size || selectedLocations.has(row.dataset.location);
+          const stateMatch = !selectedStates.size || selectedStates.has(mmState);
+          const visible = scenarioMatch && locationTypeMatch && locationMatch && stateMatch && top1Match;
+          row.hidden = !visible;
+          if (visible) visibleRows += 1;
+        }
+        section.hidden = visibleRows === 0;
+      }
+    }
+    transmissionControl.addEventListener("input", applyFilters);
+    locationTypeControl.addEventListener("input", applyFilters);
+    dateControl.addEventListener("input", applyFilters);
+    multiControls.forEach((control) => control.addEventListener("change", applyFilters));
+    applyFilters();
+  </script>
 </body>
 </html>`;
 }

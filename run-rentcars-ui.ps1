@@ -75,7 +75,7 @@ function Show-RunPicker {
   $form.Text = "RentCars.pl - Options"
   $form.StartPosition = "CenterScreen"
   $form.Width = 560
-  $form.Height = 930
+  $form.Height = 1010
   $form.TopMost = $true
 
   $durationsLabel = New-Object System.Windows.Forms.Label
@@ -265,6 +265,24 @@ function Show-RunPicker {
   $speedCombo.SelectedIndex = 0
   $form.Controls.Add($speedCombo)
 
+  $transmissionLabel = New-Object System.Windows.Forms.Label
+  $transmissionLabel.Left = 20
+  $transmissionLabel.Top = 825
+  $transmissionLabel.Width = 500
+  $transmissionLabel.Height = 22
+  $transmissionLabel.Text = "Transmission"
+  $form.Controls.Add($transmissionLabel)
+
+  $transmissionCombo = New-Object System.Windows.Forms.ComboBox
+  $transmissionCombo.Left = 20
+  $transmissionCombo.Top = 850
+  $transmissionCombo.Width = 250
+  $transmissionCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+  [void]$transmissionCombo.Items.Add("all cars")
+  [void]$transmissionCombo.Items.Add("automatic only")
+  $transmissionCombo.SelectedIndex = 0
+  $form.Controls.Add($transmissionCombo)
+
   function Format-IsoDate([datetime]$value) {
     return $value.Date.ToString("yyyy-MM-dd")
   }
@@ -388,7 +406,7 @@ function Show-RunPicker {
 
   $runButton = New-Object System.Windows.Forms.Button
   $runButton.Left = 20
-  $runButton.Top = 850
+  $runButton.Top = 920
   $runButton.Width = 170
   $runButton.Height = 30
   $runButton.Text = "Run"
@@ -396,7 +414,7 @@ function Show-RunPicker {
 
   $cancelButton = New-Object System.Windows.Forms.Button
   $cancelButton.Left = 210
-  $cancelButton.Top = 850
+  $cancelButton.Top = 920
   $cancelButton.Width = 170
   $cancelButton.Height = 30
   $cancelButton.Text = "Cancel"
@@ -455,10 +473,12 @@ function Show-RunPicker {
       return
     }
 
+    $selectedTransmission = if ($transmissionCombo.SelectedIndex -eq 1) { "automatic" } else { "any" }
     $form.Tag = [PSCustomObject]@{
       selected_durations = @($picked)
       start_dates = $pickedStartDates
       speed_mode = [string]$speedCombo.SelectedItem
+      transmission = $selectedTransmission
     }
     $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $form.Close()
@@ -635,6 +655,10 @@ try {
   if ([string]::IsNullOrWhiteSpace($speedMode)) {
     $speedMode = "fast"
   }
+  $transmission = [string]$pickedOptions.transmission
+  if ([string]::IsNullOrWhiteSpace($transmission)) {
+    $transmission = "any"
+  }
 
   $outputDir = Join-Path $root "output"
   if (-not (Test-Path $outputDir)) {
@@ -658,6 +682,7 @@ try {
     "--start-dates=$startDatesCsv",
     "--durations-days=$durationsCsv",
     "--speed-mode=$speedMode",
+    "--transmission=$transmission",
     "--timeout-ms=30000",
     "--output-json=$jsonPath"
   )

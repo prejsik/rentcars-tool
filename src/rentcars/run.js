@@ -159,6 +159,23 @@ function providerRatingText(rating) {
   return numeric.toFixed(1).replace(/\.0$/, "");
 }
 
+function rankOffersByProvider(rows) {
+  const byProvider = new Map();
+  for (const row of rows) {
+    const providerKey = normalizeWhitespace(row.provider_name).toLowerCase();
+    if (!providerKey) {
+      continue;
+    }
+    const existing = byProvider.get(providerKey);
+    if (!existing || Number(row.total_price) < Number(existing.total_price)) {
+      byProvider.set(providerKey, row);
+    }
+  }
+  return [...byProvider.values()].sort(
+    (left, right) => Number(left.total_price) - Number(right.total_price)
+  );
+}
+
 function groupTopOffersByLocation(results, sortOrders) {
   const grouped = new Map();
 
@@ -175,10 +192,9 @@ function groupTopOffersByLocation(results, sortOrders) {
     const location = rows[0]?.pickup_location || rows[0]?.location || key;
     top3ByLocation[location] = {};
     for (const sortOrder of sortOrders) {
-      top3ByLocation[location][sortOrder] = [...rows]
-        .filter((row) => (row.sort_order || "suggested") === sortOrder)
-        .sort((left, right) => Number(left.total_price) - Number(right.total_price))
-        .slice(0, 3);
+      top3ByLocation[location][sortOrder] = rankOffersByProvider(
+        rows.filter((row) => (row.sort_order || "suggested") === sortOrder)
+      ).slice(0, 3);
     }
   }
 
@@ -298,6 +314,7 @@ function buildRootPayload({
     time_zone: "Europe/Warsaw",
     locations: config.locations,
     sort_orders: config.sortOrders,
+    transmission: config.transmission,
     scenario_count: scenarios.length,
     expected_scenario_count: expectedScenarioCount,
     completed_scenario_count: scenarios.length,
