@@ -620,6 +620,15 @@ runTest("push smoke cannot deploy Pages or notify Telegram", () => {
   assert.doesNotMatch(smoke, /deploy-pages|Notify Telegram|github-pages/i);
 });
 
+runTest("daily Telegram message preserves blank lines between links", () => {
+  const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
+
+  assert.match(daily, /printf -v message 'RentCars\.pl: run finished/);
+  assert.match(daily, /printf -v section 'Current HTML report:\\n%sreport\.html\\n\\n'/);
+  assert.match(daily, /printf -v section 'Artifact backup:\\n%s\\n\\n'/);
+  assert.doesNotMatch(daily, /message\+=\$\(printf/);
+});
+
 runTest("daily merge installs dependencies before generating the Excel summary", () => {
   const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
   const mergeJob = daily.slice(daily.indexOf("  merge:"));

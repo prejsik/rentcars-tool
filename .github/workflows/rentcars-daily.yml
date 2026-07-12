@@ -440,16 +440,19 @@ jobs:
             progress="report generation failed; no merged JSON"
           fi
 
-          message=$(printf 'RentCars.pl: run finished (%s).\n\n' "$progress")
+          printf -v message 'RentCars.pl: run finished (%s).\n\n' "$progress"
           if [[ -n "$PAGE_URL" ]]; then
-            message+=$(printf 'Current HTML report:\n%sreport.html\n\n' "${PAGE_URL%/}/")
+            printf -v section 'Current HTML report:\n%sreport.html\n\n' "${PAGE_URL%/}/"
           else
-            message+=$(printf 'GitHub Pages deployment was not confirmed for this run.\n\n')
+            printf -v section 'GitHub Pages deployment was not confirmed for this run.\n\n'
           fi
+          message+="$section"
           if [[ -n "$ARTIFACT_URL" ]]; then
-            message+=$(printf 'Artifact backup:\n%s\n\n' "$ARTIFACT_URL")
+            printf -v section 'Artifact backup:\n%s\n\n' "$ARTIFACT_URL"
+            message+="$section"
           fi
-          message+=$(printf 'GitHub Actions run:\n%s\n' "$RUN_URL")
+          printf -v section 'GitHub Actions run:\n%s\n' "$RUN_URL"
+          message+="$section"
 
           curl --fail --show-error --silent \
             --retry 3 \
