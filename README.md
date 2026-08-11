@@ -72,7 +72,7 @@ The RentCars.pl GitHub workflow lives in a separate file:
 .github/workflows/rentcars-daily.yml
 ```
 
-The daily workflow groups start dates into bounded chunks, merges all chunk JSON files, deploys one final report, and sends one Telegram message. A separate `rentcars-smoke.yml` workflow runs after pushes but uploads only a smoke artifact; it cannot overwrite GitHub Pages or send Telegram notifications.
+The daily workflow groups start dates into bounded chunks, merges all chunk JSON files, deploys one final report, and sends one Telegram message. If the primary scheduled run fails before scraping starts, it sends a failure alert and the 02:17 Europe/Warsaw recovery trigger retries it once. A separate `rentcars-smoke.yml` workflow runs after pushes but uploads only a smoke artifact; it cannot overwrite GitHub Pages or send Telegram notifications.
 
 It uploads a separate merged artifact named `rentcars-results-<run number>` with:
 

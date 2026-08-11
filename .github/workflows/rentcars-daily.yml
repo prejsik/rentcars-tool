@@ -4,6 +4,7 @@ on:
   schedule:
     - cron: "17 23 * * *"
     - cron: "17 0 * * *"
+    - cron: "17 1 * * *"
   workflow_dispatch:
     inputs:
       locations:
@@ -32,6 +33,7 @@ on:
         default: "6"
 
 permissions:
+  actions: read
   contents: read
   pages: write
   id-token: write
@@ -63,12 +65,11 @@ jobs:
       matrix: ${{ steps.options.outputs.matrix }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Check Warsaw schedule gate
         id: gate
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           warsaw_now="$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')"
           trigger_schedule="${{ github.event.schedule }}"
@@ -89,10 +90,48 @@ jobs:
           echo "Schedule expression: $trigger_schedule"
           echo "Scheduled UTC trigger maps to Warsaw: $intended_warsaw_time"
           if [[ "$intended_warsaw_hour" == "01" ]]; then
+            echo "Primary daily trigger selected."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$intended_warsaw_hour" != "02" ]]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          runs_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/workflows/rentcars-daily.yml/runs?event=schedule&status=completed&per_page=10"
+          if ! runs_json=$(curl --fail --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$runs_url"); then
+            echo "::warning::Could not inspect the primary daily run; automatic recovery is skipped."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          retry_run_id=$(printf '%s' "$runs_json" | node -e '
+            const fs = require("fs");
+            const runs = JSON.parse(fs.readFileSync(0, "utf8")).workflow_runs || [];
+            const latest = runs[0];
+            const ageMs = latest ? Date.now() - Date.parse(latest.created_at) : Infinity;
+            if (latest?.conclusion === "failure" && ageMs >= 0 && ageMs <= 6 * 60 * 60 * 1000) {
+              process.stdout.write(String(latest.id));
+            }
+          ')
+
+          if [[ -n "$retry_run_id" ]]; then
+            echo "Recovering failed scheduled run $retry_run_id."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
+            echo "No recent failed scheduled run needs recovery."
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Checkout repository
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/checkout@v4
 
       - name: Resolve matrix options
         id: options
@@ -198,6 +237,37 @@ jobs:
           echo "Expected airport checks: $expected_check_count"
           echo "Dates per chunk: $chunk_size"
 
+  notify-plan-failure:
+    name: Notify Telegram if planning fails
+    needs: plan
+    if: always() && needs.plan.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Notify Telegram about startup failure
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            echo "::error::Telegram secrets are missing."
+            exit 1
+          fi
+
+          printf -v message 'RentCars.pl: run failed before scraping could start.\n\nGitHub Actions run:\n%s\n\nIf this was the primary daily trigger, an automatic recovery run will be attempted around 02:17 Europe/Warsaw.' "$RUN_URL"
+          curl --fail --show-error --silent \
+            --retry 3 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            --request POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${message}" \
+            --data-urlencode "disable_web_page_preview=true"
+
   scrape:
     name: Scrape chunk ${{ matrix.chunk_id }}
     needs: plan
@@ -280,7 +350,7 @@ jobs:
     needs:
       - plan
       - scrape
-    if: always() && needs.plan.outputs.should_run == 'true'
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment:

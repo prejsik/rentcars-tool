@@ -629,6 +629,22 @@ runTest("daily Telegram message preserves blank lines between links", () => {
   assert.doesNotMatch(daily, /message\+=\$\(printf/);
 });
 
+runTest("daily workflow alerts and retries after a planning failure", () => {
+  const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
+  const gateIndex = daily.indexOf("- name: Check Warsaw schedule gate");
+  const checkoutIndex = daily.indexOf("- name: Checkout repository");
+
+  assert.match(daily, /- cron: "17 1 \* \* \*"/);
+  assert.match(daily, /^  actions: read$/m);
+  assert.ok(gateIndex >= 0 && checkoutIndex > gateIndex);
+  assert.match(daily, /if: steps\.gate\.outputs\.should_run == 'true'/);
+  assert.match(daily, /latest\?\.conclusion === "failure"/);
+  assert.match(daily, /^  notify-plan-failure:$/m);
+  assert.match(daily, /if: always\(\) && needs\.plan\.result == 'failure'/);
+  assert.match(daily, /RentCars\.pl: run failed before scraping could start/);
+  assert.match(daily, /if: always\(\) && needs\.plan\.result == 'success' && needs\.plan\.outputs\.should_run == 'true'/);
+});
+
 runTest("daily merge installs dependencies before generating the Excel summary", () => {
   const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
   const mergeJob = daily.slice(daily.indexOf("  merge:"));
