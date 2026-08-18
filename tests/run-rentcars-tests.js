@@ -645,10 +645,11 @@ runTest("daily workflow alerts and retries after a planning failure", () => {
   assert.match(daily, /if: always\(\) && needs\.plan\.result == 'success' && needs\.plan\.outputs\.should_run == 'true'/);
 });
 
-runTest("daily schedule checks 60 rolling start dates", () => {
+runTest("daily schedule checks 60 rolling start dates for durations 2-14", () => {
   const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
 
   assert.match(daily, /^  SCHEDULE_ROLLING_DAYS: "60"$/m);
+  assert.match(daily, /^  SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"$/m);
 });
 
 runTest("daily merge installs dependencies before generating the Excel summary", () => {
