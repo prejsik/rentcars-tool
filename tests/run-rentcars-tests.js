@@ -629,6 +629,104 @@ runTest("daily Telegram message preserves blank lines between links", () => {
   assert.doesNotMatch(daily, /message\+=\$\(printf/);
 });
 
+runTest("Telegram MM alert separates confirmed absences from incomplete dates", () => {
+  const { buildMmAvailabilityAlert } = require("../src/rentcars/telegramSummary");
+  const payload = {
+    scenarios: [
+      {
+        start_date: "2026-09-04",
+        rental_days: 2,
+        expected_check_count: 1,
+        successful_check_count: 1,
+        results: [{ provider_name: "INTER FLEET" }]
+      },
+      {
+        start_date: "2026-09-04",
+        rental_days: 3,
+        expected_check_count: 1,
+        successful_check_count: 1,
+        results: [{ provider_name: "Kaizen Rent" }]
+      },
+      {
+        start_date: "2026-09-05",
+        rental_days: 2,
+        expected_check_count: 1,
+        successful_check_count: 1,
+        results: [{ provider_name: "INTER FLEET" }]
+      },
+      {
+        start_date: "2026-09-06",
+        rental_days: 2,
+        expected_check_count: 1,
+        successful_check_count: 1,
+        results: [{ provider_name: "MM Cars Rental" }]
+      }
+    ]
+  };
+
+  assert.equal(buildMmAvailabilityAlert(payload, {
+    expectedStartDates: ["2026-09-04", "2026-09-05", "2026-09-06"],
+    expectedDurations: [2, 3]
+  }), [
+    "ALERT MM Cars Rental",
+    "",
+    "Brak MM - pełne dane:",
+    "2026-09-04",
+    "",
+    "Nie można potwierdzić - niepełne dane:",
+    "2026-09-05"
+  ].join("\n"));
+});
+
+runTest("Telegram MM alert is empty when MM is visible for every expected date", () => {
+  const { buildMmAvailabilityAlert } = require("../src/rentcars/telegramSummary");
+  const payload = {
+    scenarios: [{
+      start_date: "2026-09-06",
+      rental_days: 2,
+      expected_check_count: 1,
+      successful_check_count: 1,
+      results: [{ provider_name: "MM Service Lease Polska Sp. z o.o." }]
+    }]
+  };
+
+  assert.equal(buildMmAvailabilityAlert(payload, {
+    expectedStartDates: ["2026-09-06"],
+    expectedDurations: [2]
+  }), "");
+});
+
+runTest("Telegram MM alert CLI accepts all planned dates and durations", () => {
+  const os = require("node:os");
+  const path = require("node:path");
+  const { execFileSync } = require("node:child_process");
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "rentcars-mm-alert-"));
+  const inputPath = path.join(tempDir, "results.json");
+
+  try {
+    fs.writeFileSync(inputPath, JSON.stringify({
+      scenarios: [{
+        start_date: "2026-09-04",
+        rental_days: 2,
+        expected_check_count: 1,
+        successful_check_count: 1,
+        results: [{ provider_name: "INTER FLEET" }]
+      }]
+    }));
+    const output = execFileSync(process.execPath, [
+      path.resolve("src/rentcars/telegramSummary.js"),
+      inputPath,
+      "2026-09-04,2026-09-05",
+      "2"
+    ], { encoding: "utf8" });
+
+    assert.match(output, /Brak MM - pełne dane:\r?\n2026-09-04/);
+    assert.match(output, /Nie można potwierdzić - niepełne dane:\r?\n2026-09-05/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 runTest("daily workflow alerts and retries after a planning failure", () => {
   const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
   const gateIndex = daily.indexOf("- name: Check Warsaw schedule gate");

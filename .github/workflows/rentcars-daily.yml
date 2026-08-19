@@ -54,6 +54,7 @@ jobs:
       should_run: ${{ steps.gate.outputs.should_run }}
       locations: ${{ steps.options.outputs.locations }}
       rolling_days: ${{ steps.options.outputs.rolling_days }}
+      start_dates: ${{ steps.options.outputs.start_dates }}
       durations: ${{ steps.options.outputs.durations }}
       speed_mode: ${{ steps.options.outputs.speed_mode }}
       sort_orders: ${{ steps.options.outputs.sort_orders }}
@@ -148,6 +149,7 @@ jobs:
             echo 'matrix={"include":[{"chunk_id":"skip","start_dates":"skip"}]}' >> "$GITHUB_OUTPUT"
             echo "locations=" >> "$GITHUB_OUTPUT"
             echo "rolling_days=0" >> "$GITHUB_OUTPUT"
+            echo "start_dates=" >> "$GITHUB_OUTPUT"
             echo "durations=" >> "$GITHUB_OUTPUT"
             echo "speed_mode=fast" >> "$GITHUB_OUTPUT"
             echo "sort_orders=price_insurance" >> "$GITHUB_OUTPUT"
@@ -217,9 +219,11 @@ jobs:
             process.stdout.write(JSON.stringify({ include }));
           ' "$chunk_size" "${dates[@]}")
           run_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          start_dates="$(IFS=,; echo "${dates[*]}")"
 
           echo "locations=$locations" >> "$GITHUB_OUTPUT"
           echo "rolling_days=$rolling_days" >> "$GITHUB_OUTPUT"
+          echo "start_dates=$start_dates" >> "$GITHUB_OUTPUT"
           echo "durations=$durations" >> "$GITHUB_OUTPUT"
           echo "speed_mode=$speed_mode" >> "$GITHUB_OUTPUT"
           echo "sort_orders=$sort_orders" >> "$GITHUB_OUTPUT"
@@ -491,6 +495,8 @@ jobs:
           PAGE_URL: ${{ steps.pages-deployment.outcome == 'success' && steps.pages-deployment.outputs.page_url || '' }}
           ARTIFACT_URL: ${{ steps.upload.outputs['artifact-url'] }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXPECTED_START_DATES: ${{ needs.plan.outputs.start_dates }}
+          EXPECTED_DURATIONS: ${{ needs.plan.outputs.durations }}
         run: |
           if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
             echo "::error::Telegram secrets are missing."
@@ -506,11 +512,23 @@ jobs:
               const checks = `${data.successful_check_count || 0} successful, ${data.failed_check_count || 0} failed, ${data.missing_check_count || 0} missing / ${data.expected_check_count || 0} checks`;
               process.stdout.write(`${status}; ${scenarios}; ${checks}; generated ${data.generated_at || "unknown"}`);
             ')
+            if ! mm_alert=$(node src/rentcars/telegramSummary.js \
+              output/rentcars-results-latest.json \
+              "$EXPECTED_START_DATES" \
+              "$EXPECTED_DURATIONS"); then
+              echo "::warning::Could not calculate the MM Cars Rental availability alert."
+              mm_alert=$'ALERT MM Cars Rental\nNie udało się sprawdzić obecności MM w raporcie.'
+            fi
           else
             progress="report generation failed; no merged JSON"
+            mm_alert=""
           fi
 
           printf -v message 'RentCars.pl: run finished (%s).\n\n' "$progress"
+          if [[ -n "$mm_alert" ]]; then
+            printf -v section '%s\n\n' "$mm_alert"
+            message+="$section"
+          fi
           if [[ -n "$PAGE_URL" ]]; then
             printf -v section 'Current HTML report:\n%sreport.html\n\n' "${PAGE_URL%/}/"
           else
