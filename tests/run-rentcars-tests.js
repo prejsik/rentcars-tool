@@ -27,6 +27,18 @@ function runTest(name, fn) {
   }
 }
 
+const asyncTests = [];
+
+function runAsyncTest(name, fn) {
+  asyncTests.push(Promise.resolve().then(fn).then(() => {
+    console.log(`PASS ${name}`);
+  }).catch((error) => {
+    console.error(`FAIL ${name}`);
+    console.error(error instanceof Error ? error.stack : String(error));
+    process.exitCode = 1;
+  }));
+}
+
 runTest("parseMoney handles Polish zloty prices", () => {
   assert.deepEqual(parseMoney("od 199,00 z\u0142 za dzie\u0144"), {
     value: 199,
@@ -260,6 +272,204 @@ runTest("insurance mode rejects an ambiguous network total and accepts an explic
   assert.equal(verified.priceVerified, true);
 });
 
+runTest("insurance mode adds an insurance surcharge to the base rental price", () => {
+  const scraper = new RentCarsScraper({ transmission: "any" });
+  const target = {
+    requestedLocation: "Warszawa",
+    location: "Warszawa, Lotnisko-Okecie",
+    value: "1",
+    sortOrder: "price_insurance",
+    priceMode: "insurance"
+  };
+
+  const verified = scraper.normalizeOfferCandidate({
+    providerName: "Provider A",
+    totalPrice: 900,
+    insurance: { total: 140 }
+  }, target, "network");
+
+  assert.equal(verified.totalPrice, 1040);
+  assert.equal(verified.basePrice, 900);
+  assert.equal(verified.protectedPrice, 1040);
+  assert.equal(verified.priceVerified, true);
+});
+
+runTest("insurance mode adds a surcharge even when it exceeds the base rental price", () => {
+  const scraper = new RentCarsScraper({ transmission: "any" });
+  const target = {
+    requestedLocation: "Warszawa",
+    location: "Warszawa, Lotnisko-Okecie",
+    value: "1",
+    sortOrder: "price_insurance",
+    priceMode: "insurance"
+  };
+
+  const verified = scraper.normalizeOfferCandidate({
+    providerName: "Provider A",
+    totalPrice: 300,
+    insurance: { total: 450 }
+  }, target, "network");
+
+  assert.equal(verified.totalPrice, 750);
+  assert.equal(verified.basePrice, 300);
+  assert.equal(verified.protectedPrice, 750);
+});
+
+runAsyncTest("failed direct search falls back to the RentCars search form", async () => {
+  const scraper = new RentCarsScraper({
+    baseUrl: "https://rentcars.pl/",
+    timeoutMs: 1000,
+    speedMode: "fast",
+    transmission: "any",
+    maxProvidersPerLocation: 25,
+    focusProviders: []
+  });
+  let gotoCount = 0;
+  let formUsed = false;
+  const page = {
+    goto: async () => {
+      gotoCount += 1;
+      if (gotoCount === 1) {
+        throw new Error("temporary direct navigation failure");
+      }
+    },
+    setDefaultTimeout: () => {},
+    setDefaultNavigationTimeout: () => {},
+    on: () => {}
+  };
+  const context = {
+    newPage: async () => page,
+    close: async () => {}
+  };
+  const browser = { newContext: async () => context };
+
+  scraper.configureContext = async () => {};
+  scraper.acceptCookies = async () => {};
+  scraper.dismissObstructiveOverlays = async () => {};
+  scraper.fillSearchForm = async () => { formUsed = true; };
+  scraper.submitSearch = async () => {};
+  scraper.ensureConfiguredSearchPeriod = async () => {};
+  scraper.waitForResults = async () => {};
+  scraper.waitForCollectorOffers = async () => {};
+  scraper.collectOffersFromCurrentPage = async () => [{
+    provider: "Provider A",
+    totalPrice: 200,
+    currency: "PLN",
+    location: "Warszawa, Lotnisko-Okecie",
+    sortOrder: "price_insurance",
+    priceMode: "insurance",
+    priceVerified: true,
+    transmission: "automatic"
+  }];
+  scraper.loadAdditionalResultPages = async () => true;
+
+  const outcome = await scraper.runSingleLocation(browser, {
+    requestedLocation: "Warszawa",
+    location: "Warszawa, Lotnisko-Okecie",
+    value: "1",
+    sortOrder: "price_insurance",
+    priceMode: "insurance"
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.equal(formUsed, true);
+  assert.equal(gotoCount, 2);
+});
+
+runTest("response collector keeps equal-price automatic and manual offers", () => {
+  const scraper = new RentCarsScraper({ transmission: "any" });
+  const collector = scraper.createResponseCollector();
+
+  collector.add([
+    { provider: "Provider A", totalPrice: 200, location: "Warszawa", sortOrder: "price_insurance", priceMode: "insurance", transmission: "manual" },
+    { provider: "Provider A", totalPrice: 200, location: "Warszawa", sortOrder: "price_insurance", priceMode: "insurance", transmission: "automatic" }
+  ]);
+
+  assert.deepEqual(
+    collector.getOffers().map((offer) => offer.transmission).sort(),
+    ["automatic", "manual"]
+  );
+});
+
+runAsyncTest("pagination continues past three providers until MM is found", async () => {
+  const scraper = new RentCarsScraper({
+    transmission: "any",
+    maxAdditionalResultPages: 1,
+    maxProvidersPerLocation: 25,
+    timeoutMs: 1000
+  });
+  let loadMoreChecks = 0;
+  scraper.findLoadMoreControl = async () => {
+    loadMoreChecks += 1;
+    return loadMoreChecks === 1
+      ? { locator: { click: async () => true }, href: "" }
+      : null;
+  };
+  scraper.waitForResults = async () => {};
+  scraper.waitForCollectorOffers = async () => {};
+  scraper.collectOffersFromCurrentPage = async () => [{
+    provider: "MM Cars Rental",
+    totalPrice: 240,
+    priceVerified: true,
+    transmission: "automatic"
+  }];
+
+  const accumulatedOffers = ["A", "B", "C"].map((provider, index) => ({
+    provider,
+    totalPrice: 200 + index,
+    priceVerified: true,
+    transmission: "automatic"
+  }));
+  const complete = await scraper.loadAdditionalResultPages(
+    { url: () => "https://rentcars.pl/search/test", waitForLoadState: async () => {} },
+    { location: "Warszawa", sortOrder: "price_insurance", priceMode: "insurance" },
+    { getOffers: () => [] },
+    accumulatedOffers
+  );
+
+  assert.equal(complete, true);
+  assert.equal(loadMoreChecks, 1);
+  assert.equal(accumulatedOffers.at(-1).provider, "MM Cars Rental");
+});
+
+runAsyncTest("pagination reports incomplete MM coverage when more results remain", async () => {
+  const scraper = new RentCarsScraper({
+    transmission: "any",
+    maxAdditionalResultPages: 1,
+    maxProvidersPerLocation: 25,
+    timeoutMs: 1000
+  });
+  let loadMoreChecks = 0;
+  const loadMoreControl = { locator: { click: async () => true }, href: "" };
+  scraper.findLoadMoreControl = async () => {
+    loadMoreChecks += 1;
+    return loadMoreControl;
+  };
+  scraper.waitForResults = async () => {};
+  scraper.waitForCollectorOffers = async () => {};
+  scraper.collectOffersFromCurrentPage = async () => [{
+    provider: "Provider D",
+    totalPrice: 240,
+    priceVerified: true,
+    transmission: "automatic"
+  }];
+
+  const complete = await scraper.loadAdditionalResultPages(
+    { url: () => "https://rentcars.pl/search/test", waitForLoadState: async () => {} },
+    { location: "Warszawa", sortOrder: "price_insurance", priceMode: "insurance" },
+    { getOffers: () => [] },
+    ["A", "B", "C"].map((provider, index) => ({
+      provider,
+      totalPrice: 200 + index,
+      priceVerified: true,
+      transmission: "automatic"
+    }))
+  );
+
+  assert.equal(complete, false);
+  assert.equal(loadMoreChecks, 2);
+});
+
 runTest("city location expansion keeps only RentCars airport pickup points", () => {
   const options = [
     { value: "1", label: "Warszawa, Centrum" },
@@ -346,6 +556,7 @@ runTest("buildHtmlReport renders RentCars title and top offer columns", () => {
   });
 
   assert.match(html, /RentCars\.pl report/);
+  assert.match(html, /rentcars-report-metadata-version/);
   assert.match(html, /Top 1 firma/);
   assert.match(html, /Top 1 PLN\/d/);
   assert.match(html, /TM Flota \(5\)/);
@@ -617,6 +828,8 @@ runTest("push smoke cannot deploy Pages or notify Telegram", () => {
 
   assert.doesNotMatch(daily, /^  push:/m);
   assert.match(smoke, /^  push:/m);
+  assert.match(smoke, /- "tests\/\*\*"/);
+  assert.match(smoke, /run: npm test/);
   assert.doesNotMatch(smoke, /deploy-pages|Notify Telegram|github-pages/i);
 });
 
@@ -678,6 +891,32 @@ runTest("Telegram MM alert separates confirmed absences from incomplete dates", 
   ].join("\n"));
 });
 
+runTest("Telegram MM alert treats unfinished result pagination as incomplete data", () => {
+  const { buildMmAvailabilityAlert } = require("../src/rentcars/telegramSummary");
+  const payload = {
+    scenarios: [{
+      start_date: "2026-09-07",
+      rental_days: 2,
+      expected_check_count: 1,
+      successful_check_count: 1,
+      expected_targets: [{
+        location: "Warszawa, Lotnisko-Okecie",
+        sort_order: "price_insurance",
+        mm_coverage_complete: false
+      }],
+      results: [{ provider_name: "INTER FLEET" }]
+    }]
+  };
+
+  const alert = buildMmAvailabilityAlert(payload, {
+    expectedStartDates: ["2026-09-07"],
+    expectedDurations: [2]
+  });
+
+  assert.doesNotMatch(alert, /Brak MM - pełne dane/);
+  assert.match(alert, /Nie można potwierdzić - niepełne dane:\n2026-09-07/);
+});
+
 runTest("Telegram MM alert is empty when MM is visible for every expected date", () => {
   const { buildMmAvailabilityAlert } = require("../src/rentcars/telegramSummary");
   const payload = {
@@ -727,27 +966,306 @@ runTest("Telegram MM alert CLI accepts all planned dates and durations", () => {
   }
 });
 
-runTest("daily workflow alerts and retries after a planning failure", () => {
+runTest("daily workflow leaves delayed recovery to the watchdog", () => {
   const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
   const gateIndex = daily.indexOf("- name: Check Warsaw schedule gate");
   const checkoutIndex = daily.indexOf("- name: Checkout repository");
 
-  assert.match(daily, /- cron: "17 1 \* \* \*"/);
-  assert.match(daily, /^  actions: read$/m);
+  assert.doesNotMatch(daily, /- cron: "17 1 \* \* \*"/);
   assert.ok(gateIndex >= 0 && checkoutIndex > gateIndex);
   assert.match(daily, /if: steps\.gate\.outputs\.should_run == 'true'/);
-  assert.match(daily, /latest\?\.conclusion === "failure"/);
+  assert.doesNotMatch(daily, /retry_run_id|status=completed/);
   assert.match(daily, /^  notify-plan-failure:$/m);
   assert.match(daily, /if: always\(\) && needs\.plan\.result == 'failure'/);
   assert.match(daily, /RentCars\.pl: run failed before scraping could start/);
+  assert.match(daily, /watchdog check will run around 06:30 Europe\/Warsaw/);
   assert.match(daily, /if: always\(\) && needs\.plan\.result == 'success' && needs\.plan\.outputs\.should_run == 'true'/);
+});
+
+runTest("daily workflow marks incomplete chunks and guards Pages publication", () => {
+  const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
+  const freshnessStep = daily.slice(
+    daily.indexOf("      - name: Check report freshness"),
+    daily.indexOf("      - name: Ensure GitHub Pages is enabled")
+  );
+
+  assert.match(daily, /rentcars-part-\$\{\{ matrix\.chunk_id \}\}-attempt-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(daily, /rentcars-results-\$\{\{ github\.run_number \}\}-attempt-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(daily, /name: github-pages-attempt-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(daily, /artifact_name: github-pages-attempt-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(daily, /Fail incomplete chunk for workflow retry/);
+  assert.match(daily, /group: rentcars-pages-publication/);
+  assert.match(daily, /cancel-in-progress: false/);
+  assert.match(daily, /Check report freshness/);
+  assert.match(daily, /report-meta\.json/);
+  assert.match(daily, /buildMmAvailabilityAlert\(\{ scenarios: \[\] \}/);
+  assert.match(freshnessStep, /echo "publish=false"/);
+  assert.match(freshnessStep, /current_http_status/);
+  assert.match(freshnessStep, /"\$current_http_status" == "404"/);
+  assert.match(freshnessStep, /rentcars-report-metadata-version/);
+  assert.match(freshnessStep, /pages_api_status/);
+  assert.match(freshnessStep, /WATCHDOG_OUTPUT=latest_primary_run_id/);
+  assert.match(freshnessStep, /latest_primary_id/);
+  assert.match(freshnessStep, /GITHUB_RUN_ID/);
+});
+
+runTest("watchdog runs after the normal completion window and safely retries the complete workflow", () => {
+  const watchdog = fs.readFileSync(".github/workflows/rentcars-watchdog.yml", "utf8");
+  const watchdogScript = fs.readFileSync("src/rentcars/watchdog.js", "utf8");
+
+  assert.match(watchdog, /- cron: "30 4 \* \* \*"/);
+  assert.match(watchdog, /- cron: "30 5 \* \* \*"/);
+  assert.match(watchdog, /- cron: "30 6 \* \* \*"/);
+  assert.match(watchdog, /- cron: "30 7 \* \* \*"/);
+  assert.match(watchdog, /^  actions: write$/m);
+  assert.match(watchdog, /actions\/setup-node@v4/);
+  assert.match(watchdog, /node src\/rentcars\/watchdog\.js/);
+  assert.match(watchdogScript, /has_scrape_jobs/);
+  assert.match(watchdogScript, /jobs_url/);
+  assert.match(watchdog, /actions\/runs\/\$\{TARGET_RUN_ID\}\/rerun"/);
+  assert.doesNotMatch(watchdog, /rerun-failed-jobs/);
+  assert.match(watchdog, /actions\/workflows\/rentcars-daily\.yml\/dispatches/);
+  assert.match(watchdog, /if: always\(\) && steps\.gate\.outputs\.should_run == 'true'/);
+  assert.match(watchdog, /TELEGRAM_BOT_TOKEN/);
+});
+
+runTest("watchdog ignores a companion run without scrape jobs and retries the failed primary run", () => {
+  const { classifyDailyRuns } = require("../src/rentcars/watchdog");
+  const decision = classifyDailyRuns([
+    {
+      id: 202,
+      event: "schedule",
+      status: "completed",
+      conclusion: "success",
+      created_at: "2026-08-21T00:17:00.000Z",
+      updated_at: "2026-08-21T00:26:17.000Z",
+      has_scrape_jobs: false,
+      run_attempt: 1
+    },
+    {
+      id: 201,
+      event: "schedule",
+      status: "completed",
+      conclusion: "failure",
+      created_at: "2026-08-20T23:17:00.000Z",
+      updated_at: "2026-08-21T04:40:00.000Z",
+      has_scrape_jobs: true,
+      run_attempt: 1
+    }
+  ], { now: "2026-08-21T04:30:00.000Z" });
+
+  assert.deepEqual(decision, { action: "rerun", runId: 201, runAttempt: 1 });
+});
+
+runTest("watchdog monitors a primary run that is still active", () => {
+  const { classifyDailyRuns } = require("../src/rentcars/watchdog");
+  const decision = classifyDailyRuns([{
+    id: 301,
+    event: "schedule",
+    status: "in_progress",
+    conclusion: null,
+    has_scrape_jobs: true,
+    created_at: "2026-08-20T23:17:00.000Z",
+    updated_at: "2026-08-21T04:20:00.000Z",
+    run_attempt: 1
+  }], { now: "2026-08-21T04:30:00.000Z" });
+
+  assert.deepEqual(decision, { action: "monitor", runId: 301, runAttempt: 1 });
+});
+
+runTest("watchdog dispatches a replacement when no recent primary run exists", () => {
+  const { classifyDailyRuns } = require("../src/rentcars/watchdog");
+  const decision = classifyDailyRuns([], { now: "2026-08-21T04:30:00.000Z" });
+
+  assert.deepEqual(decision, { action: "dispatch", runId: null, runAttempt: 0 });
+});
+
+runTest("watchdog recognizes its active replacement workflow", () => {
+  const { classifyDailyRuns } = require("../src/rentcars/watchdog");
+  const decision = classifyDailyRuns([{
+    id: 401,
+    event: "workflow_dispatch",
+    display_title: "RentCars watchdog recovery",
+    status: "in_progress",
+    conclusion: null,
+    has_scrape_jobs: false,
+    created_at: "2026-08-21T04:35:00.000Z",
+    updated_at: "2026-08-21T06:20:00.000Z",
+    run_attempt: 1
+  }], { now: "2026-08-21T06:30:00.000Z" });
+
+  assert.deepEqual(decision, { action: "monitor", runId: 401, runAttempt: 1 });
+});
+
+runTest("watchdog does not retry an older run while its replacement is starting", () => {
+  const { classifyDailyRuns } = require("../src/rentcars/watchdog");
+  const decision = classifyDailyRuns([
+    {
+      id: 402,
+      event: "workflow_dispatch",
+      display_title: "RentCars watchdog recovery",
+      status: "in_progress",
+      conclusion: null,
+      has_scrape_jobs: false,
+      created_at: "2026-08-21T04:35:00.000Z",
+      updated_at: "2026-08-21T04:36:00.000Z",
+      run_attempt: 1
+    },
+    {
+      id: 403,
+      event: "schedule",
+      status: "completed",
+      conclusion: "failure",
+      has_scrape_jobs: true,
+      created_at: "2026-08-20T23:17:00.000Z",
+      updated_at: "2026-08-21T04:30:00.000Z",
+      run_attempt: 1
+    }
+  ], { now: "2026-08-21T06:30:00.000Z" });
+
+  assert.deepEqual(decision, { action: "monitor", runId: 402, runAttempt: 1 });
+});
+
+runAsyncTest("watchdog enriches daily runs with scrape job evidence", async () => {
+  const { enrichRunJobEvidence } = require("../src/rentcars/watchdog");
+  const enriched = await enrichRunJobEvidence([{
+    id: 501,
+    jobs_url: "https://api.github.test/runs/501/jobs"
+  }], {
+    token: "test-token",
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        jobs: [
+          { name: "Plan RentCars.pl matrix", conclusion: "success" },
+          { name: "Scrape chunk 001", conclusion: "success" }
+        ]
+      })
+    })
+  });
+
+  assert.equal(enriched[0].has_scrape_jobs, true);
+});
+
+runAsyncTest("watchdog keeps evaluating runs when one jobs API request fails", async () => {
+  const { classifyDailyRuns, enrichRunJobEvidence } = require("../src/rentcars/watchdog");
+  const enriched = await enrichRunJobEvidence([
+    {
+      id: 601,
+      event: "schedule",
+      status: "completed",
+      conclusion: "success",
+      created_at: "2026-08-21T00:17:00.000Z",
+      jobs_url: "https://api.github.test/runs/601/jobs"
+    },
+    {
+      id: 602,
+      event: "schedule",
+      status: "completed",
+      conclusion: "failure",
+      created_at: "2026-08-20T23:17:00.000Z",
+      run_attempt: 1,
+      jobs_url: "https://api.github.test/runs/602/jobs"
+    }
+  ], {
+    token: "test-token",
+    fetchImpl: async (url) => url.includes("601")
+      ? { ok: false, status: 500 }
+      : {
+        ok: true,
+        json: async () => ({ jobs: [{ name: "Scrape chunk 001", conclusion: "failure" }] })
+      }
+  });
+
+  assert.match(enriched[0].job_evidence_error, /HTTP 500/);
+  assert.equal(enriched[1].has_scrape_jobs, true);
+  assert.deepEqual(
+    classifyDailyRuns(enriched, { now: "2026-08-21T04:30:00.000Z" }),
+    { action: "rerun", runId: 602, runAttempt: 1 }
+  );
+});
+
+runTest("watchdog reports an inspection failure instead of dispatching a duplicate", () => {
+  const { classifyDailyRuns } = require("../src/rentcars/watchdog");
+  const decision = classifyDailyRuns([{
+    id: 603,
+    event: "schedule",
+    status: "in_progress",
+    conclusion: null,
+    created_at: "2026-08-20T23:17:00.000Z",
+    run_attempt: 1,
+    job_evidence_error: "HTTP 500"
+  }], { now: "2026-08-21T04:30:00.000Z" });
+
+  assert.deepEqual(decision, { action: "inspection_failed", runId: 603, runAttempt: 1 });
+});
+
+runTest("Pages bootstrap selects only the newest run with scrape jobs", () => {
+  const { selectNewestPrimaryRun } = require("../src/rentcars/watchdog");
+  const selected = selectNewestPrimaryRun([
+    {
+      id: 701,
+      event: "schedule",
+      status: "completed",
+      conclusion: "success",
+      has_scrape_jobs: true,
+      created_at: "2026-08-20T23:17:00.000Z"
+    },
+    {
+      id: 702,
+      event: "schedule",
+      status: "completed",
+      conclusion: "success",
+      has_scrape_jobs: false,
+      created_at: "2026-08-21T00:17:00.000Z"
+    },
+    {
+      id: 703,
+      event: "workflow_dispatch",
+      display_title: "RentCars watchdog recovery",
+      status: "in_progress",
+      conclusion: null,
+      has_scrape_jobs: true,
+      created_at: "2026-08-21T04:35:00.000Z"
+    }
+  ]);
+
+  assert.equal(selected.id, 703);
+});
+
+runTest("Pages bootstrap blocks when a newer run has unknown job evidence", () => {
+  const { selectNewestPrimaryRun } = require("../src/rentcars/watchdog");
+  const selected = selectNewestPrimaryRun([
+    {
+      id: 704,
+      event: "schedule",
+      status: "completed",
+      conclusion: "success",
+      has_scrape_jobs: true,
+      created_at: "2026-08-20T23:17:00.000Z"
+    },
+    {
+      id: 705,
+      event: "schedule",
+      status: "in_progress",
+      conclusion: null,
+      job_evidence_error: "HTTP 500",
+      created_at: "2026-08-21T00:17:00.000Z"
+    }
+  ]);
+
+  assert.equal(selected, null);
 });
 
 runTest("daily schedule checks 60 rolling start dates for durations 2-14", () => {
   const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
+  const rollingInput = daily.slice(daily.indexOf("      rolling_days:"), daily.indexOf("      durations:"));
+  const durationsInput = daily.slice(daily.indexOf("      durations:"), daily.indexOf("      speed_mode:"));
 
   assert.match(daily, /^  SCHEDULE_ROLLING_DAYS: "60"$/m);
   assert.match(daily, /^  SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"$/m);
+  assert.match(rollingInput, /default: "60"/);
+  assert.match(durationsInput, /default: "2,3,4,5,6,7,8,9,10,11,12,13,14"/);
 });
 
 runTest("daily merge installs dependencies before generating the Excel summary", () => {
@@ -886,6 +1404,100 @@ runTest("mergePayloads combines matrix chunks into one sorted root report", () =
   assert.equal(payload.scenarios[0].results.length, 1);
 });
 
-if (!process.exitCode) {
-  console.log("All RentCars tests passed.");
-}
+runTest("mergePayloads combines complementary successful checks from retried chunks", () => {
+  const expectedTargets = [
+    { location: "Warszawa, Lotnisko-Modlin", sort_order: "price_insurance", mm_coverage_complete: true },
+    { location: "Warszawa, Lotnisko-Okecie", sort_order: "price_insurance", mm_coverage_complete: true }
+  ];
+  const makeScenario = (result, failedLocation) => ({
+    scenario_id: "2026-09-10-2",
+    start_date: "2026-09-10",
+    rental_days: 2,
+    expected_targets: expectedTargets,
+    expected_check_count: 2,
+    successful_check_count: 1,
+    failed_check_count: 1,
+    results: [result],
+    errors: [{ location: failedLocation, sort_order: "price_insurance", error: "temporary failure" }],
+    top_3_by_location: {
+      [result.pickup_location]: { price_insurance: [result] }
+    }
+  });
+  const modlin = {
+    provider_name: "Provider A",
+    pickup_location: "Warszawa, Lotnisko-Modlin",
+    sort_order: "price_insurance",
+    total_price: 200,
+    rental_days: 2
+  };
+  const okecie = {
+    provider_name: "Provider B",
+    pickup_location: "Warszawa, Lotnisko-Okecie",
+    sort_order: "price_insurance",
+    total_price: 220,
+    rental_days: 2
+  };
+
+  const payload = mergePayloads([
+    { file: "attempt-1.json", payload: { scenarios: [makeScenario(modlin, okecie.pickup_location)] } },
+    { file: "attempt-2.json", payload: { scenarios: [makeScenario(okecie, modlin.pickup_location)] } }
+  ], {
+    expectedScenarioCount: 1,
+    expectedCheckCount: 2,
+    generatedAt: "2026-09-01T08:00:00.000Z"
+  });
+
+  assert.equal(payload.scenarios.length, 1);
+  assert.deepEqual(
+    payload.scenarios[0].results.map((result) => result.pickup_location).sort(),
+    ["Warszawa, Lotnisko-Modlin", "Warszawa, Lotnisko-Okecie"]
+  );
+  assert.equal(payload.scenarios[0].errors.length, 0);
+  assert.equal(payload.successful_check_count, 2);
+  assert.equal(payload.failed_check_count, 0);
+  assert.equal(payload.run_status, "complete");
+});
+
+runTest("mergePayloads uses the newest successful price for a repeated target", () => {
+  const target = {
+    location: "Warszawa, Lotnisko-Okecie",
+    sort_order: "price_insurance",
+    mm_coverage_complete: true
+  };
+  const makeScenario = (price) => ({
+    scenario_id: "2026-09-10-2",
+    start_date: "2026-09-10",
+    rental_days: 2,
+    expected_targets: [target],
+    expected_check_count: 1,
+    successful_check_count: 1,
+    failed_check_count: 0,
+    results: [{
+      provider_name: "Provider A",
+      pickup_location: target.location,
+      sort_order: target.sort_order,
+      total_price: price,
+      rental_days: 2,
+      transmission: "automatic"
+    }],
+    errors: []
+  });
+
+  const payload = mergePayloads([
+    { file: "attempt-1.json", payload: { scenarios: [makeScenario(200)] } },
+    { file: "attempt-2.json", payload: { scenarios: [makeScenario(250)] } }
+  ], {
+    expectedScenarioCount: 1,
+    expectedCheckCount: 1,
+    generatedAt: "2026-09-01T08:00:00.000Z"
+  });
+
+  assert.equal(payload.scenarios[0].results.length, 1);
+  assert.equal(payload.scenarios[0].results[0].total_price, 250);
+});
+
+Promise.all(asyncTests).then(() => {
+  if (!process.exitCode) {
+    console.log("All RentCars tests passed.");
+  }
+});

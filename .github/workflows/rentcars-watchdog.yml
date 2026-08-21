@@ -1,0 +1,156 @@
+name: RentCars daily watchdog
+
+on:
+  schedule:
+    - cron: "30 4 * * *"
+    - cron: "30 5 * * *"
+    - cron: "30 6 * * *"
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  watchdog:
+    name: Check the RentCars daily run
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check Warsaw watchdog gate
+        id: gate
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" != "schedule" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          trigger_schedule="${{ github.event.schedule }}"
+          scheduled_minute="${trigger_schedule%% *}"
+          schedule_tail="${trigger_schedule#* }"
+          scheduled_hour="${schedule_tail%% *}"
+          utc_date="$(date -u +%Y-%m-%d)"
+          intended_warsaw_hour="$(TZ=Europe/Warsaw date -d "$utc_date $scheduled_hour:$scheduled_minute UTC" +%H)"
+          intended_warsaw_minute="$(TZ=Europe/Warsaw date -d "$utc_date $scheduled_hour:$scheduled_minute UTC" +%M)"
+
+          if [[ "$intended_warsaw_minute" == "30" && ( "$intended_warsaw_hour" == "06" || "$intended_warsaw_hour" == "08" ) ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Inspect recent RentCars daily runs
+        if: steps.gate.outputs.should_run == 'true'
+        id: decision
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          runs_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/workflows/rentcars-daily.yml/runs?per_page=20"
+          runs_json=$(curl --fail --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$runs_url")
+          decision_json=$(printf '%s' "$runs_json" | node src/rentcars/watchdog.js)
+          DECISION_JSON="$decision_json" node -e '
+            const decision = JSON.parse(process.env.DECISION_JSON);
+            process.stdout.write(`action=${decision.action}\nrun_id=${decision.runId || ""}\nrun_attempt=${decision.runAttempt || 0}\n`);
+          ' >> "$GITHUB_OUTPUT"
+          echo "Watchdog decision: $decision_json"
+
+      - name: Recover or report RentCars daily status
+        if: always() && steps.gate.outputs.should_run == 'true' && steps.decision.outputs.action != 'none'
+        shell: bash
+        env:
+          ACTION: ${{ steps.decision.outputs.action }}
+          TARGET_RUN_ID: ${{ steps.decision.outputs.run_id }}
+          TARGET_RUN_ATTEMPT: ${{ steps.decision.outputs.run_attempt }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          api_failed=false
+          target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${TARGET_RUN_ID}"
+          if [[ -z "$TARGET_RUN_ID" ]]; then
+            target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/rentcars-daily.yml"
+          fi
+
+          case "$ACTION" in
+            rerun)
+              if curl --fail --silent --show-error \
+                --request POST \
+                --header "Accept: application/vnd.github+json" \
+                --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                "${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/runs/${TARGET_RUN_ID}/rerun"; then
+                message="RentCars.pl watchdog: retrying the complete run ${TARGET_RUN_ID} after attempt ${TARGET_RUN_ATTEMPT}, so every chunk artifact is rebuilt."
+              else
+                api_failed=true
+                message="RentCars.pl watchdog: could not retry run ${TARGET_RUN_ID}."
+              fi
+              ;;
+            dispatch)
+              dispatch_payload=$(printf '{"ref":"%s","inputs":{"rolling_days":"60","durations":"2,3,4,5,6,7,8,9,10,11,12,13,14","speed_mode":"fast","sort_orders":"price_insurance","location_concurrency":"6","watchdog_recovery":"true"}}' "$DEFAULT_BRANCH")
+              if curl --fail --silent --show-error \
+                --request POST \
+                --header "Accept: application/vnd.github+json" \
+                --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                --data "$dispatch_payload" \
+                "${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/workflows/rentcars-daily.yml/dispatches"; then
+                message="RentCars.pl watchdog: no recent primary run was found, so a replacement 60-day / duration 2-14 run was started."
+                target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/rentcars-daily.yml"
+              else
+                api_failed=true
+                message="RentCars.pl watchdog: no recent primary run was found and the replacement run could not be started."
+              fi
+              ;;
+            monitor)
+              message="RentCars.pl watchdog: the daily run is still active at this checkpoint."
+              ;;
+            inspection_failed)
+              message="RentCars.pl watchdog: GitHub did not provide enough job data to verify run ${TARGET_RUN_ID}. No duplicate run was started; manual inspection is required."
+              api_failed=true
+              ;;
+            exhausted)
+              message="RentCars.pl watchdog: run ${TARGET_RUN_ID} is still failing after three attempts; automatic retries are exhausted."
+              ;;
+            *)
+              message="RentCars.pl watchdog: unexpected decision ${ACTION}."
+              api_failed=true
+              ;;
+          esac
+
+          printf -v telegram_message '%s\n\nGitHub Actions:\n%s' "$message" "$target_url"
+          if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+            curl --fail --show-error --silent \
+              --retry 3 \
+              --retry-delay 3 \
+              --retry-all-errors \
+              --request POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=${telegram_message}" \
+              --data-urlencode "disable_web_page_preview=true"
+          else
+            echo "::warning::Telegram secrets are missing; watchdog action completed without a message."
+          fi
+
+          if [[ "$api_failed" == "true" ]]; then
+            exit 1
+          fi

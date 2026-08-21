@@ -1,10 +1,10 @@
 name: RentCars daily run
+run-name: ${{ inputs.watchdog_recovery == 'true' && 'RentCars watchdog recovery' || 'RentCars daily run' }}
 
 on:
   schedule:
     - cron: "17 23 * * *"
     - cron: "17 0 * * *"
-    - cron: "17 1 * * *"
   workflow_dispatch:
     inputs:
       locations:
@@ -14,11 +14,11 @@ on:
       rolling_days:
         description: "How many pickup start dates from tomorrow"
         required: true
-        default: "30"
+        default: "60"
       durations:
         description: "Comma-separated rental durations"
         required: true
-        default: "2,3,4,5,6,7,8,9,10"
+        default: "2,3,4,5,6,7,8,9,10,11,12,13,14"
       speed_mode:
         description: "Scraper speed mode: safe, fast, or turbo"
         required: true
@@ -31,6 +31,10 @@ on:
         description: "Parallel RentCars.pl pickup locations per scenario"
         required: true
         default: "6"
+      watchdog_recovery:
+        description: "Internal marker used by the scheduled watchdog"
+        required: false
+        default: "false"
 
 permissions:
   actions: read
@@ -69,8 +73,6 @@ jobs:
       - name: Check Warsaw schedule gate
         id: gate
         shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           warsaw_now="$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')"
           trigger_schedule="${{ github.event.schedule }}"
@@ -96,39 +98,8 @@ jobs:
             exit 0
           fi
 
-          if [[ "$intended_warsaw_hour" != "02" ]]; then
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          runs_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/workflows/rentcars-daily.yml/runs?event=schedule&status=completed&per_page=10"
-          if ! runs_json=$(curl --fail --silent --show-error \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "$runs_url"); then
-            echo "::warning::Could not inspect the primary daily run; automatic recovery is skipped."
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          retry_run_id=$(printf '%s' "$runs_json" | node -e '
-            const fs = require("fs");
-            const runs = JSON.parse(fs.readFileSync(0, "utf8")).workflow_runs || [];
-            const latest = runs[0];
-            const ageMs = latest ? Date.now() - Date.parse(latest.created_at) : Infinity;
-            if (latest?.conclusion === "failure" && ageMs >= 0 && ageMs <= 6 * 60 * 60 * 1000) {
-              process.stdout.write(String(latest.id));
-            }
-          ')
-
-          if [[ -n "$retry_run_id" ]]; then
-            echo "Recovering failed scheduled run $retry_run_id."
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No recent failed scheduled run needs recovery."
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "Companion UTC trigger skipped."
+          echo "should_run=false" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
         if: steps.gate.outputs.should_run == 'true'
@@ -261,7 +232,7 @@ jobs:
             exit 1
           fi
 
-          printf -v message 'RentCars.pl: run failed before scraping could start.\n\nGitHub Actions run:\n%s\n\nIf this was the primary daily trigger, an automatic recovery run will be attempted around 02:17 Europe/Warsaw.' "$RUN_URL"
+          printf -v message 'RentCars.pl: run failed before scraping could start.\n\nGitHub Actions run:\n%s\n\nThe watchdog check will run around 06:30 Europe/Warsaw.' "$RUN_URL"
           curl --fail --show-error --silent \
             --retry 3 \
             --retry-delay 3 \
@@ -329,6 +300,18 @@ jobs:
           scraper_status=$?
           set -e
 
+          if [[ "$scraper_status" -eq 0 && -f "$json_path" ]]; then
+            chunk_run_status=$(node -e '
+              const fs = require("fs");
+              const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              process.stdout.write(String(data.run_status || (data.is_partial ? "partial" : "complete")));
+            ' "$json_path")
+            if [[ "$chunk_run_status" != "complete" ]]; then
+              scraper_status=20
+              echo "::warning::Chunk $chunk_id produced status $chunk_run_status and makes the workflow eligible for a complete retry."
+            fi
+          fi
+
           echo "scraper_status=$scraper_status" >> "$GITHUB_OUTPUT"
           if [[ "$scraper_status" -eq 124 ]]; then
             echo "::warning::Chunk $chunk_id reached its controlled timeout. Uploading the latest snapshot."
@@ -340,7 +323,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rentcars-part-${{ matrix.chunk_id }}
+          name: rentcars-part-${{ matrix.chunk_id }}-attempt-${{ github.run_attempt }}
           path: |
             output/rentcars-results-chunk-${{ matrix.chunk_id }}.json
             output/rentcars-run-chunk-${{ matrix.chunk_id }}-log.txt
@@ -348,6 +331,11 @@ jobs:
             artifacts/rentcars/**
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Fail incomplete chunk for workflow retry
+        if: always() && steps.scraper.outputs.scraper_status != '0'
+        shell: bash
+        run: exit 1
 
   merge:
     name: Merge and publish RentCars.pl report
@@ -357,6 +345,9 @@ jobs:
     if: always() && needs.plan.result == 'success' && needs.plan.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    concurrency:
+      group: rentcars-pages-publication
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.pages-deployment.outputs.page_url }}
@@ -410,9 +401,146 @@ jobs:
           node src/rentcars/reportXlsx.js output/rentcars-results-latest.json output/rentcars-summary.xlsx
           echo "workbook_exists=true" >> "$GITHUB_OUTPUT"
 
+      - name: Generate report metadata
+        id: metadata
+        shell: bash
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_EVENT: ${{ github.event_name }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const data = JSON.parse(fs.readFileSync("output/rentcars-results-latest.json", "utf8"));
+            const metadata = {
+              run_id: process.env.RUN_ID,
+              run_attempt: Number(process.env.RUN_ATTEMPT || 1),
+              event: process.env.RUN_EVENT,
+              execution_started_at: data.execution_started_at || "",
+              generated_at: data.generated_at || "",
+              run_status: data.run_status || "",
+              completed_scenario_count: Number(data.completed_scenario_count || 0),
+              expected_scenario_count: Number(data.expected_scenario_count || 0),
+              successful_check_count: Number(data.successful_check_count || 0),
+              failed_check_count: Number(data.failed_check_count || 0),
+              missing_check_count: Number(data.missing_check_count || 0),
+              expected_check_count: Number(data.expected_check_count || 0)
+            };
+            fs.writeFileSync("output/rentcars-report-meta.json", `${JSON.stringify(metadata, null, 2)}\n`);
+          '
+          echo "metadata_exists=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check report freshness
+        id: freshness
+        if: always() && steps.metadata.outputs.metadata_exists == 'true'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          echo "publish=false" >> "$GITHUB_OUTPUT"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          current_meta_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${repository_name}/report-meta.json?run=${GITHUB_RUN_ID}"
+          if ! current_http_status=$(curl --silent --show-error --max-time 15 \
+            --output /tmp/current-report-meta.json \
+            --write-out "%{http_code}" \
+            "$current_meta_url"); then
+            echo "::warning::Could not verify the current Pages report. Publication is blocked for this run."
+            exit 0
+          fi
+
+          if [[ "$current_http_status" == "404" ]]; then
+            runs_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/workflows/rentcars-daily.yml/runs?per_page=20"
+            if ! recent_runs_json=$(curl --fail --silent --show-error --max-time 20 \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$runs_url"); then
+              echo "::warning::Could not identify the newest primary RentCars run. Publication is blocked for this run."
+              exit 0
+            fi
+            if ! latest_primary_id=$(printf '%s' "$recent_runs_json" \
+              | WATCHDOG_OUTPUT=latest_primary_run_id node src/rentcars/watchdog.js); then
+              echo "::warning::Could not verify primary-run job evidence. Publication is blocked for this run."
+              exit 0
+            fi
+            if [[ "$latest_primary_id" != "$GITHUB_RUN_ID" ]]; then
+              echo "::warning::Run $GITHUB_RUN_ID is not the newest primary run ($latest_primary_id). Publication is blocked."
+              exit 0
+            fi
+
+            current_report_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${repository_name}/report.html?run=${GITHUB_RUN_ID}"
+            if ! current_report_status=$(curl --silent --show-error --max-time 30 \
+              --range 0-8191 \
+              --output /tmp/current-report-head.html \
+              --write-out "%{http_code}" \
+              "$current_report_url"); then
+              echo "::warning::Report metadata and HTML could not be verified. Publication is blocked for this run."
+              exit 0
+            fi
+
+            if [[ "$current_report_status" == "200" || "$current_report_status" == "206" ]]; then
+              if grep --quiet "rentcars-report-metadata-version" /tmp/current-report-head.html; then
+                echo "::warning::The current report expects metadata, but report-meta.json returned 404. Publication is blocked for this run."
+                exit 0
+              fi
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              echo "Legacy Pages report detected; this run may perform the one-time metadata migration."
+              exit 0
+            fi
+
+            if [[ "$current_report_status" != "404" ]]; then
+              echo "::warning::Current Pages HTML returned HTTP $current_report_status. Publication is blocked for this run."
+              exit 0
+            fi
+
+            pages_api_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/pages"
+            if ! pages_api_status=$(curl --silent --show-error --max-time 15 \
+              --output /tmp/pages-bootstrap-status.json \
+              --write-out "%{http_code}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$pages_api_url"); then
+              echo "::warning::Could not verify whether Pages exists. Publication is blocked for this run."
+              exit 0
+            fi
+            if [[ "$pages_api_status" == "404" ]]; then
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              echo "GitHub Pages is not configured yet; this first report may bootstrap it."
+            else
+              echo "::warning::Pages exists but neither metadata nor report HTML was available. Publication is blocked for this run."
+            fi
+            exit 0
+          fi
+          if [[ "$current_http_status" != "200" ]]; then
+            echo "::warning::Pages metadata returned HTTP $current_http_status. Publication is blocked for this run."
+            exit 0
+          fi
+
+          if ! freshness_decision=$(node -e '
+            const fs = require("fs");
+            const current = JSON.parse(fs.readFileSync("/tmp/current-report-meta.json", "utf8"));
+            const candidate = JSON.parse(fs.readFileSync("output/rentcars-report-meta.json", "utf8"));
+            const currentStarted = Date.parse(current.execution_started_at || "");
+            const candidateStarted = Date.parse(candidate.execution_started_at || "");
+            if (!Number.isFinite(currentStarted) || !Number.isFinite(candidateStarted)) {
+              throw new Error("Invalid report execution timestamp.");
+            }
+            process.stdout.write(currentStarted > candidateStarted ? "stale" : "publish");
+          '); then
+            echo "::warning::Pages metadata could not be compared. Publication is blocked for this run."
+            exit 0
+          fi
+
+          if [[ "$freshness_decision" == "publish" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::A newer report is already published. This run will keep only its artifact."
+          fi
+
       - name: Ensure GitHub Pages is enabled
         id: pages-status
-        if: always() && steps.report.outputs.report_exists == 'true'
+        if: always() && steps.report.outputs.report_exists == 'true' && steps.freshness.outputs.publish == 'true'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -448,40 +576,45 @@ jobs:
           fi
 
       - name: Prepare GitHub Pages site
-        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true' && steps.freshness.outputs.publish == 'true'
         shell: bash
         run: |
           mkdir -p pages
           cp output/rentcars-report.html pages/index.html
           cp output/rentcars-report.html pages/report.html
+          cp output/rentcars-report-meta.json pages/report-meta.json
 
       - name: Configure GitHub Pages
-        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true' && steps.freshness.outputs.publish == 'true'
         uses: actions/configure-pages@v5
         continue-on-error: true
 
       - name: Upload GitHub Pages artifact
-        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true' && steps.freshness.outputs.publish == 'true'
         uses: actions/upload-pages-artifact@v3
         continue-on-error: true
         with:
+          name: github-pages-attempt-${{ github.run_attempt }}
           path: pages
 
       - name: Deploy GitHub Pages
         id: pages-deployment
-        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true'
+        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true' && steps.freshness.outputs.publish == 'true'
         uses: actions/deploy-pages@v4
         continue-on-error: true
+        with:
+          artifact_name: github-pages-attempt-${{ github.run_attempt }}
 
       - name: Upload merged RentCars.pl results
         id: upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rentcars-results-${{ github.run_number }}
+          name: rentcars-results-${{ github.run_number }}-attempt-${{ github.run_attempt }}
           path: |
             output/rentcars-results-latest.json
             output/rentcars-report.html
+            output/rentcars-report-meta.json
             output/rentcars-summary.xlsx
           if-no-files-found: warn
           retention-days: 30
@@ -521,7 +654,13 @@ jobs:
             fi
           else
             progress="report generation failed; no merged JSON"
-            mm_alert=""
+            mm_alert=$(node -e '
+              const { buildMmAvailabilityAlert } = require("./src/rentcars/telegramSummary");
+              process.stdout.write(buildMmAvailabilityAlert({ scenarios: [] }, {
+                expectedStartDates: process.env.EXPECTED_START_DATES,
+                expectedDurations: process.env.EXPECTED_DURATIONS
+              }));
+            ')
           fi
 
           printf -v message 'RentCars.pl: run finished (%s).\n\n' "$progress"

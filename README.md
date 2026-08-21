@@ -72,9 +72,9 @@ The RentCars.pl GitHub workflow lives in a separate file:
 .github/workflows/rentcars-daily.yml
 ```
 
-The daily workflow groups start dates into bounded chunks, merges all chunk JSON files, deploys one final report, and sends one Telegram message. If the primary scheduled run fails before scraping starts, it sends a failure alert and the 02:17 Europe/Warsaw recovery trigger retries it once. A separate `rentcars-smoke.yml` workflow runs after pushes but uploads only a smoke artifact; it cannot overwrite GitHub Pages or send Telegram notifications.
+The daily workflow groups start dates into bounded chunks, merges all chunk JSON files, deploys one final report, and sends one Telegram message. A separate `rentcars-watchdog.yml` checks the run around 06:30 and 08:30 Europe/Warsaw. It retries a failed workflow as a complete new attempt so every chunk artifact is rebuilt, starts a replacement production run when the primary run is missing, and sends a Telegram status message. A separate `rentcars-smoke.yml` workflow runs tests and a bounded scraper after pushes, but it cannot overwrite GitHub Pages or send Telegram notifications.
 
-It uploads a separate merged artifact named `rentcars-results-<run number>` with:
+Each attempt uploads a separate merged artifact named `rentcars-results-<run number>-attempt-<attempt>` with:
 
 - `output/rentcars-results-latest.json`
 - `output/rentcars-report.html`
@@ -82,14 +82,14 @@ It uploads a separate merged artifact named `rentcars-results-<run number>` with
 
 Per-chunk JSON, logs, and failure artifacts remain in separate short-lived chunk artifacts instead of being duplicated in the final artifact.
 
-During long scheduled runs, every date chunk writes JSON snapshots after each completed duration. If one chunk stops early, the merge job can still publish a partial HTML report from the chunks that uploaded data.
+During long scheduled runs, every date chunk writes JSON snapshots after each completed duration. Failed workflows are retried as complete attempts because GitHub does not reliably retain successful chunk artifacts across a failed-jobs-only rerun. Complementary scenario results are still merged within the available attempt data before publication.
 
 The scheduled GitHub profile is:
 
 - around `01:17 Europe/Warsaw`
 - all locations from `src/rentcars/locations.json`
-- `rolling_days: 30`
-- `durations: 2,3,4,5,6,7,8,9,10`
+- `rolling_days: 60`
+- `durations: 2,3,4,5,6,7,8,9,10,11,12,13,14`
 - `sort_orders: price_insurance`
 - `speed_mode: fast`
 - `location_concurrency: 6`

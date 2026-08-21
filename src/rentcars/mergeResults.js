@@ -121,6 +121,183 @@ function scenarioScore(scenario) {
   return results + locations - errors;
 }
 
+function targetKey(value) {
+  const location = normalizeWhitespace(value?.pickup_location || value?.location).toLowerCase();
+  const sortOrder = normalizeWhitespace(value?.sort_order || "suggested").toLowerCase();
+  return location ? `${location}|${sortOrder}` : "";
+}
+
+function offerKey(offer) {
+  return [
+    targetKey(offer),
+    normalizeWhitespace(offer?.provider_name).toLowerCase(),
+    normalizeWhitespace(offer?.transmission || "unknown").toLowerCase()
+  ].join("|");
+}
+
+function rankOffersByProvider(offers) {
+  const providers = new Map();
+  for (const offer of offers) {
+    const provider = normalizeWhitespace(offer?.provider_name).toLowerCase();
+    if (!provider || !Number.isFinite(Number(offer?.total_price))) {
+      continue;
+    }
+    const existing = providers.get(provider);
+    if (!existing || Number(offer.total_price) < Number(existing.total_price)) {
+      providers.set(provider, offer);
+    }
+  }
+  return [...providers.values()].sort((left, right) => Number(left.total_price) - Number(right.total_price));
+}
+
+function rebuildScenarioRankings(results, sortOrders) {
+  const byLocation = new Map();
+  for (const result of results) {
+    const location = normalizeWhitespace(result?.pickup_location || result?.location);
+    if (!location) {
+      continue;
+    }
+    if (!byLocation.has(location)) {
+      byLocation.set(location, []);
+    }
+    byLocation.get(location).push(result);
+  }
+
+  const top3ByLocation = {};
+  const cheapestByLocation = {};
+  const top3PlusMmByLocation = {};
+  for (const [location, locationResults] of byLocation) {
+    const rankedLocationResults = [...locationResults]
+      .filter((offer) => Number.isFinite(Number(offer?.total_price)))
+      .sort((left, right) => Number(left.total_price) - Number(right.total_price));
+    top3ByLocation[location] = {};
+    for (const sortOrder of sortOrders) {
+      top3ByLocation[location][sortOrder] = rankOffersByProvider(
+        rankedLocationResults.filter((offer) => (offer.sort_order || "suggested") === sortOrder)
+      ).slice(0, 3);
+    }
+    cheapestByLocation[location] = rankedLocationResults[0] || null;
+    top3PlusMmByLocation[location] = {
+      top_3_by_sort: top3ByLocation[location],
+      mm_cars_rental: rankedLocationResults.find((offer) => (
+        normalizeWhitespace(offer?.provider_name).toLowerCase().includes("mm cars rental")
+      )) || null
+    };
+  }
+
+  return { top3ByLocation, cheapestByLocation, top3PlusMmByLocation };
+}
+
+function mergeScenarioAttempts(left, right) {
+  const attempts = [left, right];
+  const base = scenarioScore(right) >= scenarioScore(left) ? right : left;
+  const expectedTargets = new Map();
+  const successfulTargets = new Set();
+  const errors = new Map();
+  const offers = new Map();
+  const latestSuccessfulAttemptByTarget = new Map();
+
+  attempts.forEach((attempt, attemptIndex) => {
+    const attemptErrors = new Set((Array.isArray(attempt?.errors) ? attempt.errors : [])
+      .map(targetKey)
+      .filter(Boolean));
+    for (const target of Array.isArray(attempt?.expected_targets) ? attempt.expected_targets : []) {
+      const key = targetKey(target);
+      if (key && !attemptErrors.has(key)) {
+        latestSuccessfulAttemptByTarget.set(key, attemptIndex);
+      }
+    }
+    for (const offer of Array.isArray(attempt?.results) ? attempt.results : []) {
+      const key = targetKey(offer);
+      if (key) {
+        latestSuccessfulAttemptByTarget.set(key, attemptIndex);
+      }
+    }
+  });
+
+  attempts.forEach((attempt, attemptIndex) => {
+    const attemptErrors = new Set((Array.isArray(attempt?.errors) ? attempt.errors : [])
+      .map(targetKey)
+      .filter(Boolean));
+    for (const target of Array.isArray(attempt?.expected_targets) ? attempt.expected_targets : []) {
+      const key = targetKey(target);
+      if (!key) {
+        continue;
+      }
+      const existing = expectedTargets.get(key);
+      if (!existing || target.mm_coverage_complete === true) {
+        expectedTargets.set(key, target);
+      }
+      if (!attemptErrors.has(key)) {
+        successfulTargets.add(key);
+      }
+    }
+    for (const error of Array.isArray(attempt?.errors) ? attempt.errors : []) {
+      errors.set(targetKey(error) || normalizeWhitespace(error?.error), error);
+    }
+    const attemptOffers = new Map();
+    for (const offer of Array.isArray(attempt?.results) ? attempt.results : []) {
+      const key = offerKey(offer);
+      const existing = attemptOffers.get(key);
+      if (!existing || Number(offer.total_price) < Number(existing.total_price)) {
+        attemptOffers.set(key, offer);
+      }
+      const keyForTarget = targetKey(offer);
+      if (keyForTarget) {
+        successfulTargets.add(keyForTarget);
+      }
+    }
+    for (const [key, offer] of attemptOffers) {
+      const target = targetKey(offer);
+      if (latestSuccessfulAttemptByTarget.get(target) === attemptIndex) {
+        offers.set(key, offer);
+      }
+    }
+  });
+
+  const mergedErrors = [...errors.entries()]
+    .filter(([key]) => !successfulTargets.has(key))
+    .map(([, error]) => error);
+  const mergedResults = [...offers.values()].sort(
+    (leftOffer, rightOffer) => Number(leftOffer.total_price) - Number(rightOffer.total_price)
+  );
+  const mergedExpectedTargets = [...expectedTargets.values()];
+  const expectedCheckCount = Math.max(
+    Number(left?.expected_check_count || 0),
+    Number(right?.expected_check_count || 0),
+    mergedExpectedTargets.length
+  );
+  const successfulCheckCount = mergedExpectedTargets.length
+    ? successfulTargets.size
+    : Math.max(
+      successfulCheckCountForScenario(left),
+      successfulCheckCountForScenario(right),
+      successfulTargets.size
+    );
+  const sortOrders = [...new Set([
+    ...(Array.isArray(base?.sort_orders) ? base.sort_orders.map((entry) => entry?.order || entry) : []),
+    ...mergedResults.map((offer) => offer?.sort_order || "suggested")
+  ].filter(Boolean))];
+  const rankings = rebuildScenarioRankings(mergedResults, sortOrders);
+
+  return {
+    ...base,
+    expected_locations: [...new Set(mergedExpectedTargets.map((target) => target.location).filter(Boolean))].sort(),
+    expected_targets: mergedExpectedTargets,
+    expected_check_count: expectedCheckCount,
+    completed_check_count: successfulCheckCount + mergedErrors.length,
+    successful_check_count: successfulCheckCount,
+    failed_check_count: mergedErrors.length,
+    run_status: mergedErrors.length ? "complete_with_errors" : "complete",
+    results: mergedResults,
+    errors: mergedErrors,
+    cheapest_by_location: rankings.cheapestByLocation,
+    cheapest_overall: mergedResults[0] || null,
+    top_3_by_location: rankings.top3ByLocation,
+    top_3_plus_mm_by_location: rankings.top3PlusMmByLocation
+  };
+}
+
 function successfulCheckCountForScenario(scenario) {
   const explicit = Number(scenario?.successful_check_count);
   if (Number.isFinite(explicit) && explicit >= 0) {
@@ -180,8 +357,10 @@ function mergePayloads(entries, options = {}) {
         continue;
       }
       const existing = scenarioMap.get(key);
-      if (!existing || scenarioScore(scenario) >= scenarioScore(existing)) {
+      if (!existing) {
         scenarioMap.set(key, scenario);
+      } else {
+        scenarioMap.set(key, mergeScenarioAttempts(existing, scenario));
       }
     }
   }

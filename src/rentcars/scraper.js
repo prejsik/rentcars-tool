@@ -177,13 +177,15 @@ class RentCarsScraper {
     return {
       results,
       failures,
-      expectedTargets: searchTargets.map((target) => ({
+      expectedTargets: searchTargets.map((target, index) => ({
         requestedLocation: target.requestedLocation,
         location: target.location,
         pickupLocationId: target.value || "",
         sortOrder: target.sortOrder,
         sortLabel: target.sortLabel,
-        priceMode: target.priceMode
+        priceMode: target.priceMode,
+        mmCoverageComplete: outcomes[index]?.ok === true
+          && outcomes[index]?.mmCoverageComplete === true
       })),
       successfulCheckCount: outcomes.filter((outcome) => outcome?.ok).length,
       failedCheckCount: failures.length
@@ -298,7 +300,9 @@ class RentCarsScraper {
         homepagePrepared = true;
       }
 
-      let offers = await this.tryDirectSearchFlow(page, target, responseCollector);
+      const directSearch = await this.tryDirectSearchFlow(page, target, responseCollector);
+      let offers = directSearch.offers;
+      let mmCoverageComplete = directSearch.mmCoverageComplete;
 
       if (!offers.length) {
         if (!homepagePrepared) {
@@ -321,7 +325,7 @@ class RentCarsScraper {
         await this.waitForCollectorOffers(responseCollector, this.collectorWaitTimeoutMs());
 
         const pageOffers = await this.collectOffersFromCurrentPage(page, target);
-        await this.loadAdditionalResultPages(page, target, responseCollector, pageOffers);
+        mmCoverageComplete = await this.loadAdditionalResultPages(page, target, responseCollector, pageOffers);
         offers = dedupeOffers([
           ...responseCollector.getOffers(),
           ...pageOffers
@@ -353,6 +357,7 @@ class RentCarsScraper {
       return {
         ok: true,
         cheapest,
+        mmCoverageComplete,
         results: locationOffers.map((offer) => ({
           ...offer,
           requestedLocation: target.requestedLocation,
@@ -421,7 +426,7 @@ class RentCarsScraper {
   async tryDirectSearchFlow(page, location, collector) {
     const target = makeLocationTarget(location);
     if (!/rentcars\.pl/i.test(this.config.baseUrl) || !target.value) {
-      return [];
+      return { offers: [], mmCoverageComplete: false };
     }
 
     const origin = new URL(this.config.baseUrl).origin;
@@ -432,7 +437,7 @@ class RentCarsScraper {
       .catch(() => false);
 
     if (!loaded || !(await this.looksLikeSearchPage(page))) {
-      return [];
+      return { offers: [], mmCoverageComplete: false };
     }
 
     await this.waitForResults(page);
@@ -445,11 +450,14 @@ class RentCarsScraper {
     await this.waitForCollectorOffers(collector, this.collectorWaitTimeoutMs());
 
     const pageOffers = await this.collectOffersFromCurrentPage(page, target);
-    await this.loadAdditionalResultPages(page, target, collector, pageOffers);
-    return dedupeOffers([
-      ...collector.getOffers(),
-      ...pageOffers
-    ]);
+    const mmCoverageComplete = await this.loadAdditionalResultPages(page, target, collector, pageOffers);
+    return {
+      offers: dedupeOffers([
+        ...collector.getOffers(),
+        ...pageOffers
+      ]),
+      mmCoverageComplete
+    };
   }
 
   async resolveLocationCandidates(page, location) {
@@ -506,7 +514,8 @@ class RentCarsScraper {
     return {
       add: (entries) => {
         for (const entry of this.filterOffersForConfiguredTransmission(entries)) {
-          const key = `${entry.provider}|${entry.totalPrice}|${entry.location}|${entry.sortOrder || ""}|${entry.priceMode || ""}`;
+          const transmission = normalizeTransmission(entry.transmission) || "unknown";
+          const key = `${entry.provider}|${entry.totalPrice}|${entry.location}|${entry.sortOrder || ""}|${entry.priceMode || ""}|${transmission}`;
           if (seenKeys.has(key)) {
             continue;
           }
@@ -1321,15 +1330,7 @@ class RentCarsScraper {
 
   async loadAdditionalResultPages(page, targetInput, collector, accumulatedOffers) {
     const maxAdditionalPages = clampPositiveInteger(this.config.maxAdditionalResultPages, 1, 0, 3);
-    if (maxAdditionalPages < 1) {
-      return;
-    }
-
     const target = makeLocationTarget(targetInput);
-    const desiredProviders = Math.min(
-      3,
-      clampPositiveInteger(this.config.maxProvidersPerLocation, 3, 1, 25)
-    );
     const seenUrls = new Set([page.url()]);
 
     for (let pageIndex = 0; pageIndex < maxAdditionalPages; pageIndex += 1) {
@@ -1337,17 +1338,13 @@ class RentCarsScraper {
         ...collector.getOffers(),
         ...accumulatedOffers
       ]);
-      const configuredOffers = this.filterOffersForConfiguredTransmission(combinedOffers);
-      const configuredReady = countUniqueOfferProviders(configuredOffers) >= desiredProviders;
-      const automaticReady = normalizeTransmissionPreference(this.config.transmission) !== "any"
-        || countUniqueOfferProviders(filterOffersByTransmissionPreference(combinedOffers, "automatic")) >= desiredProviders;
-      if (configuredReady && automaticReady) {
-        return;
+      if (hasMmCarsOffer(combinedOffers)) {
+        return true;
       }
 
       const control = await this.findLoadMoreControl(page);
       if (!control) {
-        return;
+        return true;
       }
 
       const beforeUrl = page.url();
@@ -1369,7 +1366,7 @@ class RentCarsScraper {
       if (!loaded && href) {
         const nextUrl = resolveUrl(href, beforeUrl);
         if (!nextUrl || seenUrls.has(nextUrl)) {
-          return;
+          return false;
         }
 
         seenUrls.add(nextUrl);
@@ -1380,13 +1377,22 @@ class RentCarsScraper {
       }
 
       if (!loaded) {
-        return;
+        return false;
       }
 
       await this.waitForResults(page);
       await this.waitForCollectorOffers(collector, Math.min(this.collectorWaitTimeoutMs(), 5000));
       accumulatedOffers.push(...await this.collectOffersFromCurrentPage(page, target));
     }
+
+    const combinedOffers = dedupeOffers([
+      ...collector.getOffers(),
+      ...accumulatedOffers
+    ]);
+    if (hasMmCarsOffer(combinedOffers)) {
+      return true;
+    }
+    return !(await this.findLoadMoreControl(page));
   }
 
   async findLoadMoreControl(page) {
@@ -1724,9 +1730,8 @@ class RentCarsScraper {
       candidate.total_price,
       candidate.amount_total
     ]);
-    const protectedPriceMoney = firstMoney([
+    const explicitProtectedPriceMoney = firstMoney([
       candidate.protectedPrice,
-      candidate.protectionPrice,
       candidate.insuredPrice,
       candidate.priceWithProtection,
       candidate.priceWithInsurance,
@@ -1735,13 +1740,21 @@ class RentCarsScraper {
       candidate.prices?.protected,
       candidate.prices?.withProtection,
       candidate.prices?.withInsurance,
-      candidate.prices?.insurance,
       candidate.pricing?.protected,
       candidate.pricing?.withProtection,
-      candidate.pricing?.withInsurance,
+      candidate.pricing?.withInsurance
+    ]);
+    const insuranceSurchargeMoney = firstMoney([
+      candidate.protectionPrice,
+      candidate.prices?.insurance,
       candidate.protection?.total,
       candidate.insurance?.total
     ]);
+    const protectedPriceMoney = resolveProtectedPriceMoney(
+      basePriceMoney,
+      explicitProtectedPriceMoney,
+      insuranceSurchargeMoney
+    );
     const parsedMoney = target.priceMode === "insurance"
       ? protectedPriceMoney
       : basePriceMoney || protectedPriceMoney;
@@ -2258,6 +2271,31 @@ function firstMoney(values) {
   return null;
 }
 
+function resolveProtectedPriceMoney(basePriceMoney, explicitProtectedPriceMoney, insuranceSurchargeMoney) {
+  if (explicitProtectedPriceMoney) {
+    if (basePriceMoney && explicitProtectedPriceMoney.value < basePriceMoney.value) {
+      return null;
+    }
+    return explicitProtectedPriceMoney;
+  }
+
+  if (!basePriceMoney || !insuranceSurchargeMoney) {
+    return null;
+  }
+
+  const baseCurrency = normalizeCurrency(basePriceMoney.currency);
+  const insuranceCurrency = normalizeCurrency(insuranceSurchargeMoney.currency);
+  if (baseCurrency && insuranceCurrency && baseCurrency !== insuranceCurrency) {
+    return null;
+  }
+
+  return {
+    value: basePriceMoney.value + insuranceSurchargeMoney.value,
+    currency: insuranceCurrency || baseCurrency,
+    raw: `${basePriceMoney.raw || basePriceMoney.value} + ${insuranceSurchargeMoney.raw || insuranceSurchargeMoney.value}`
+  };
+}
+
 function monthName(dateParts) {
   return new Intl.DateTimeFormat("en-US", {
     month: "long",
@@ -2335,6 +2373,12 @@ function countUniqueOfferProviders(offers) {
     }
   }
   return providers.size;
+}
+
+function hasMmCarsOffer(offers) {
+  return offers.some((offer) => (
+    normalizeRentCarsProviderName(offer?.provider).toLowerCase() === "mm cars rental"
+  ));
 }
 
 function selectBestOffersByProvider(offers, targetInput, maxProviders, forcedProviderNames) {

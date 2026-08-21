@@ -232,14 +232,20 @@ function buildScenarioPayload({ config, scenarioConfig, durationDays, results, f
     };
   }
 
-  const normalizedExpectedTargets = expectedTargets.map((target) => ({
-    requested_location: target.requestedLocation || target.location || "",
-    location: target.location || "",
-    pickup_location_id: target.pickupLocationId || "",
-    sort_order: target.sortOrder || "",
-    sort_label: target.sortLabel || "",
-    price_mode: target.priceMode || ""
-  }));
+  const normalizedExpectedTargets = expectedTargets.map((target) => {
+    const normalized = {
+      requested_location: target.requestedLocation || target.location || "",
+      location: target.location || "",
+      pickup_location_id: target.pickupLocationId || "",
+      sort_order: target.sortOrder || "",
+      sort_label: target.sortLabel || "",
+      price_mode: target.priceMode || ""
+    };
+    if (typeof target.mmCoverageComplete === "boolean") {
+      normalized.mm_coverage_complete = target.mmCoverageComplete;
+    }
+    return normalized;
+  });
   const expectedLocations = [...new Set(normalizedExpectedTargets
     .map((target) => normalizeWhitespace(target.location))
     .filter(Boolean))]

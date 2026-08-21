@@ -463,6 +463,7 @@ function buildHtmlReport(payload) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="rentcars-report-metadata-version" content="1">
   <title>RentCars.pl report</title>
   <style>
     :root {

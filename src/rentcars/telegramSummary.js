@@ -59,7 +59,12 @@ function successfulCheckCount(scenario) {
 function isScenarioFullyChecked(scenario) {
   const expected = expectedCheckCount(scenario);
   const failed = Number(scenario?.failed_check_count || 0);
-  return expected > 0 && successfulCheckCount(scenario) >= expected && failed === 0;
+  const coverageComplete = !Array.isArray(scenario?.expected_targets)
+    || scenario.expected_targets.every((target) => target?.mm_coverage_complete !== false);
+  return expected > 0
+    && successfulCheckCount(scenario) >= expected
+    && failed === 0
+    && coverageComplete;
 }
 
 function buildMmAvailabilityAlert(payload, options = {}) {
