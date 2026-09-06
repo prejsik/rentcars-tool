@@ -315,7 +315,7 @@ runTest("insurance mode adds a surcharge even when it exceeds the base rental pr
   assert.equal(verified.protectedPrice, 750);
 });
 
-runAsyncTest("failed direct search falls back to the RentCars search form", async () => {
+runAsyncTest("search uses the RentCars form without speculative navigation", async () => {
   const scraper = new RentCarsScraper({
     baseUrl: "https://rentcars.pl/",
     timeoutMs: 1000,
@@ -327,11 +327,9 @@ runAsyncTest("failed direct search falls back to the RentCars search form", asyn
   let gotoCount = 0;
   let formUsed = false;
   const page = {
-    goto: async () => {
+    goto: async (url) => {
       gotoCount += 1;
-      if (gotoCount === 1) {
-        throw new Error("temporary direct navigation failure");
-      }
+      assert.equal(url, "https://rentcars.pl/");
     },
     setDefaultTimeout: () => {},
     setDefaultNavigationTimeout: () => {},
@@ -348,7 +346,6 @@ runAsyncTest("failed direct search falls back to the RentCars search form", asyn
   scraper.dismissObstructiveOverlays = async () => {};
   scraper.fillSearchForm = async () => { formUsed = true; };
   scraper.submitSearch = async () => {};
-  scraper.ensureConfiguredSearchPeriod = async () => {};
   scraper.waitForResults = async () => {};
   scraper.waitForCollectorOffers = async () => {};
   scraper.collectOffersFromCurrentPage = async () => [{
@@ -373,7 +370,25 @@ runAsyncTest("failed direct search falls back to the RentCars search form", asyn
 
   assert.equal(outcome.ok, true);
   assert.equal(formUsed, true);
-  assert.equal(gotoCount, 2);
+  assert.equal(gotoCount, 1);
+});
+
+runAsyncTest("form submission requires a RentCars results URL", async () => {
+  const scraper = new RentCarsScraper({ baseUrl: "https://rentcars.pl", timeoutMs: 1000 });
+  let submitted = false;
+  await scraper.submitSearch({
+    waitForURL: async (matches) => {
+      assert.equal(matches(new URL("https://rentcars.pl/")), false);
+      assert.equal(matches(new URL("https://other.example/pl/szukaj/abc.html")), false);
+      assert.equal(matches(new URL("https://rentcars.pl/pl/szukaj/abc123.html")), true);
+    },
+    locator: () => ({ evaluate: async (submit) => submit({ requestSubmit: () => { submitted = true; } }) })
+  });
+  assert.equal(submitted, true);
+  await assert.rejects(scraper.submitSearch({
+    waitForURL: async () => { throw new Error("navigation timed out"); },
+    locator: () => ({ evaluate: async () => {} })
+  }), /navigation timed out/);
 });
 
 runTest("response collector keeps equal-price automatic and manual offers", () => {
@@ -468,6 +483,26 @@ runAsyncTest("pagination reports incomplete MM coverage when more results remain
 
   assert.equal(complete, false);
   assert.equal(loadMoreChecks, 2);
+});
+
+runAsyncTest("finding MM does not stop collection of competitors on later pages", async () => {
+  const scraper = new RentCarsScraper({ transmission: "any", maxAdditionalResultPages: 1, timeoutMs: 1000 });
+  let clicks = 0;
+  scraper.findLoadMoreControl = async () => ({ locator: { click: async () => { clicks += 1; } } });
+  scraper.waitForResults = async () => {};
+  scraper.waitForCollectorOffers = async () => {};
+  scraper.collectOffersFromCurrentPage = async () => [
+    { provider: "Competitor", totalPrice: 210, priceVerified: true }
+  ];
+  const offers = [{ provider: "MM Cars Rental", totalPrice: 200, priceVerified: true }];
+  const complete = await scraper.loadAdditionalResultPages(
+    { url: () => "https://rentcars.pl/pl/szukaj/abc.html", waitForLoadState: async () => {} },
+    { location: "Warszawa", sortOrder: "price_insurance" },
+    { getOffers: () => [] }, offers
+  );
+  assert.equal(clicks, 1);
+  assert.equal(complete, true);
+  assert.equal(offers.at(-1).provider, "Competitor");
 });
 
 runTest("city location expansion keeps only RentCars airport pickup points", () => {

@@ -1,15 +1,12 @@
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 const { chromium } = require("playwright");
 const {
   ensureDir,
   formatMoney,
   normalizeWhitespace,
-  parseDate,
   parseMoney,
   safeFilePart,
-  toAccessibleDateLabels,
   writeTextFile
 } = require("./utils");
 const { locationCatalog, normalizeLocationKey } = require("./locations");
@@ -28,8 +25,6 @@ const COOKIE_BUTTON_PATTERNS = [
   /understand/i
 ];
 
-const SEARCH_BUTTON_PATTERNS = [/^szukaj$/i, /sprawd(?:z|\u017a) cen(?:e|\u0119)/i, /search now/i, /^search$/i, /show cars/i, /find cars/i];
-const PICKUP_VALIDATION_ERROR_PATTERN = /punkt odbioru|pick-?up location/i;
 const LOAD_MORE_RESULTS_PATTERN = /zobacz\s+wi(?:e|\u0119)cej|poka(?:z|\u017c)\s+wi(?:e|\u0119)cej|wi(?:e|\u0119)cej\s+samochod|load more|show more|more cars/i;
 const AUTOMATIC_TRANSMISSION_PATTERN = /automatyczna|automatic|automat\b/i;
 const MANUAL_TRANSMISSION_PATTERN = /manualna|manual\b|r\u0119czna|reczna/i;
@@ -80,7 +75,6 @@ async function closeBrowserWithTimeout(browser, timeoutMs = 5000) {
 class RentCarsScraper {
   constructor(config) {
     this.config = config;
-    this.locationCandidateCache = new Map();
   }
 
   async run() {
@@ -292,45 +286,26 @@ class RentCarsScraper {
     });
 
     try {
-      let homepagePrepared = false;
-      if (!this.isFastMode()) {
-        await page.goto(this.config.baseUrl, { waitUntil: "domcontentloaded" });
-        await this.acceptCookies(page);
-        await this.dismissObstructiveOverlays(page);
-        homepagePrepared = true;
-      }
-
-      const directSearch = await this.tryDirectSearchFlow(page, target, responseCollector);
-      let offers = directSearch.offers;
-      let mmCoverageComplete = directSearch.mmCoverageComplete;
-
-      if (!offers.length) {
-        if (!homepagePrepared) {
-          await page.goto(this.config.baseUrl, { waitUntil: "domcontentloaded" });
-          await this.acceptCookies(page);
-          await this.dismissObstructiveOverlays(page);
-          homepagePrepared = true;
+      await page.goto(this.config.baseUrl, { waitUntil: "domcontentloaded" });
+      await this.acceptCookies(page);
+      await this.dismissObstructiveOverlays(page);
+      await this.fillSearchForm(page, target);
+      await this.submitSearch(page);
+      await this.waitForResults(page);
+      if (this.prefersAutomaticTransmission()) {
+        responseCollector.clear();
+        if (await this.applyAutomaticTransmissionFilter(page)) {
+          console.log(`FLT ${formatSearchTarget(target)} -> automatic transmission`);
         }
-
-        await this.fillSearchForm(page, target);
-        await this.submitSearch(page);
-        await this.ensureConfiguredSearchPeriod(page);
-        await this.waitForResults(page);
-        if (this.prefersAutomaticTransmission()) {
-          responseCollector.clear();
-          if (await this.applyAutomaticTransmissionFilter(page)) {
-            console.log(`FLT ${formatSearchTarget(target)} -> automatic transmission`);
-          }
-        }
-        await this.waitForCollectorOffers(responseCollector, this.collectorWaitTimeoutMs());
-
-        const pageOffers = await this.collectOffersFromCurrentPage(page, target);
-        mmCoverageComplete = await this.loadAdditionalResultPages(page, target, responseCollector, pageOffers);
-        offers = dedupeOffers([
-          ...responseCollector.getOffers(),
-          ...pageOffers
-        ]);
       }
+      await this.waitForCollectorOffers(responseCollector, this.collectorWaitTimeoutMs());
+
+      const pageOffers = await this.collectOffersFromCurrentPage(page, target);
+      const mmCoverageComplete = await this.loadAdditionalResultPages(page, target, responseCollector, pageOffers);
+      const offers = dedupeOffers([
+        ...responseCollector.getOffers(),
+        ...pageOffers
+      ]);
       if (!offers.length) {
         throw new Error("No offers could be extracted from the results page.");
       }
@@ -421,90 +396,6 @@ class RentCarsScraper {
 
       await route.continue().catch(() => {});
     });
-  }
-
-  async tryDirectSearchFlow(page, location, collector) {
-    const target = makeLocationTarget(location);
-    if (!/rentcars\.pl/i.test(this.config.baseUrl) || !target.value) {
-      return { offers: [], mmCoverageComplete: false };
-    }
-
-    const origin = new URL(this.config.baseUrl).origin;
-    const searchUrl = this.buildDirectSearchUrl(origin, target.value);
-    const loaded = await page
-      .goto(searchUrl, { waitUntil: "domcontentloaded", timeout: this.config.timeoutMs })
-      .then(() => true)
-      .catch(() => false);
-
-    if (!loaded || !(await this.looksLikeSearchPage(page))) {
-      return { offers: [], mmCoverageComplete: false };
-    }
-
-    await this.waitForResults(page);
-    if (this.prefersAutomaticTransmission()) {
-      collector.clear();
-      if (await this.applyAutomaticTransmissionFilter(page)) {
-        console.log(`FLT ${formatSearchTarget(target)} -> automatic transmission`);
-      }
-    }
-    await this.waitForCollectorOffers(collector, this.collectorWaitTimeoutMs());
-
-    const pageOffers = await this.collectOffersFromCurrentPage(page, target);
-    const mmCoverageComplete = await this.loadAdditionalResultPages(page, target, collector, pageOffers);
-    return {
-      offers: dedupeOffers([
-        ...collector.getOffers(),
-        ...pageOffers
-      ]),
-      mmCoverageComplete
-    };
-  }
-
-  async resolveLocationCandidates(page, location) {
-    const cacheKey = normalizeWhitespace(location).toLowerCase();
-    if (this.locationCandidateCache.has(cacheKey)) {
-      return [...this.locationCandidateCache.get(cacheKey)];
-    }
-
-    const baseUrl = new URL(this.config.baseUrl);
-    const endpoint = `${baseUrl.origin}/api/v2/autocomplete?location=${encodeURIComponent(location)}`;
-    const response = await page.request.get(endpoint).catch(() => null);
-    if (!response || !response.ok()) {
-      return [];
-    }
-
-    const payload = await response.json().catch(() => null);
-    const rawCandidates = Array.isArray(payload?.result) ? payload.result : [];
-
-    const normalizedLocation = normalizeWhitespace(location).toLowerCase();
-    const allLocations = rawCandidates.filter((item) => /all locations/i.test(String(item.place || "")));
-    const cityMatches = rawCandidates.filter((item) => normalizeWhitespace(item.city).toLowerCase().includes(normalizedLocation));
-    const exactMatches = rawCandidates.filter((item) => normalizeWhitespace(item.place).toLowerCase().includes(normalizedLocation));
-
-    const candidates = [
-      ...allLocations,
-      ...cityMatches,
-      ...exactMatches,
-      ...rawCandidates
-    ];
-    this.locationCandidateCache.set(cacheKey, candidates);
-    return [...candidates];
-  }
-
-  buildDirectSearchUrl(origin, placeId) {
-    const sqPayload = {
-      PickupLocationId: placeId,
-      DropOffLocationId: placeId,
-      PickupDateTime: `${this.config.pickupDate}T${this.config.pickupTime}:00`,
-      DropOffDateTime: `${this.config.dropoffDate}T${this.config.dropoffTime}:00`,
-      ResidenceCountry: normalizeCountryCode(this.config.residenceCountry) || "PL",
-      DriverAge: Number.isFinite(this.config.driverAge) ? this.config.driverAge : 30,
-      Hash: ""
-    };
-
-    const sq = encodeSqPayload(sqPayload);
-    const guid = crypto.randomUUID();
-    return `${origin}/search/${guid}?sq=${sq}`;
   }
 
   createResponseCollector() {
@@ -627,639 +518,77 @@ class RentCarsScraper {
   }
 
   async fillSearchForm(page, locationInput) {
-    await this.dismissObstructiveOverlays(page);
     const target = makeLocationTarget(locationInput);
-    if (await this.fillRentCarsForm(page, target)) {
-      return;
-    }
-
-    await this.setPickupLocation(page, target.location);
-    await this.tryFillDateAndTimeInForm(page);
-    await this.setResidenceCountry(page, this.config.residenceCountry);
-    await this.setDriverAge(page, this.config.driverAge);
-  }
-
-  async fillRentCarsForm(page, locationInput) {
-    if (!/rentcars\.pl/i.test(this.config.baseUrl)) {
-      return false;
-    }
-
-    const hasForm = await page.locator("#form-cars-search").first().isVisible().catch(() => false);
-    if (!hasForm) {
-      return false;
-    }
-
-    const target = makeLocationTarget(locationInput);
-    const selected = await page.evaluate(
-      ({ locationText, locationValue, pickupDate, dropoffDate, pickupTime, dropoffTime, sortOrder }) => {
-        const normalize = (value) => String(value || "")
-          .normalize("NFD")
-          .replace(/[\u0141\u0142]/g, "l")
-          .replace(/[\u0300-\u036f]/g, "")
-          .replace(/\s+/g, " ")
-          .trim()
-          .toLowerCase();
-
-        const dispatch = (element) => {
-          element.dispatchEvent(new Event("input", { bubbles: true }));
-          element.dispatchEvent(new Event("change", { bubbles: true }));
-        };
-
-        const chooseLocation = (selectId, hiddenId, preselectionId, displayId) => {
-          const select = document.querySelector(selectId);
-          if (!(select instanceof HTMLSelectElement)) {
-            return null;
-          }
-
-          const wanted = normalize(locationText);
-          const wantedValue = String(locationValue || "");
-          const options = Array.from(select.options).filter((option) => option.value);
-          const exactValue = wantedValue
-            ? options.find((option) => option.value === wantedValue)
-            : null;
-          const exactLabel = options.find((option) => normalize(option.textContent) === wanted);
-          const exactCity = options.find((option) => normalize(option.textContent) === `${wanted}, centrum`);
-          const startsWithCity = options.find((option) =>
-            normalize(option.textContent).startsWith(`${wanted},`) && !/lotnisko/i.test(option.textContent || "")
-          );
-          const anyCity = options.find((option) => normalize(option.textContent).startsWith(`${wanted},`));
-          const containsCity = options.find((option) => normalize(option.textContent).includes(wanted));
-          const option = exactValue || exactLabel || exactCity || startsWithCity || anyCity || containsCity;
-
-          if (!option) {
-            return null;
-          }
-
-          select.value = option.value;
-          dispatch(select);
-
-          for (const selector of [hiddenId, preselectionId]) {
-            const hidden = document.querySelector(selector);
-            if (hidden instanceof HTMLInputElement) {
-              hidden.value = option.value;
-              dispatch(hidden);
-            }
-          }
-
-          const display = document.querySelector(displayId);
-          if (display) {
-            display.textContent = option.textContent || "";
-            display.setAttribute("title", option.textContent || "");
-          }
-
-          return {
-            value: option.value,
-            label: option.textContent || ""
-          };
-        };
-
-        const setInputValue = (selector, value) => {
-          const input = document.querySelector(selector);
-          if (!(input instanceof HTMLInputElement)) {
-            return false;
-          }
-          input.value = value;
-          dispatch(input);
-          return true;
-        };
-
-        const setSelectValue = (selector, value, displayId) => {
-          const select = document.querySelector(selector);
-          if (!(select instanceof HTMLSelectElement)) {
-            return false;
-          }
-          select.value = value;
-          dispatch(select);
-          const display = document.querySelector(displayId);
-          if (display) {
-            display.textContent = value;
-            display.setAttribute("title", value);
-          }
-          return true;
-        };
-
-        const setHiddenValue = (selector, value) => {
-          const input = document.querySelector(selector);
-          if (!(input instanceof HTMLInputElement)) {
-            return false;
-          }
-          input.value = value;
-          dispatch(input);
-          return true;
-        };
-
-        const pickup = chooseLocation(
-          "#pickup-location_place",
-          "#pickup-location",
-          "#pickup-location_place_preselection",
-          "#select2-pickup-location_place-container"
+    await page.locator("#form-cars-search").waitFor({ state: "visible", timeout: this.config.timeoutMs });
+    const filled = await page.evaluate(({ target, config }) => {
+      const normalize = (value) => String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0141\u0142]/g, "l")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+      const form = document.querySelector("#form-cars-search");
+      const setValue = (selector, value) => {
+        const input = form.querySelector(selector);
+        if (!(input instanceof HTMLInputElement || input instanceof HTMLSelectElement)) {
+          return false;
+        }
+        input.value = value;
+        return input.value === value;
+      };
+      const chooseLocation = (prefix) => {
+        const select = form.querySelector(`#${prefix}-location_place`);
+        if (!(select instanceof HTMLSelectElement)) {
+          return false;
+        }
+        const option = Array.from(select.options).find((item) =>
+          item.value && normalize(item.textContent) === normalize(target.location)
+          && (!target.value || item.value === target.value)
         );
-        const dropoff = chooseLocation(
-          "#return-location_place",
-          "#return-location",
-          "#return-location_place_preselection",
-          "#select2-return-location_place-container"
-        );
+        if (!option) {
+          return false;
+        }
+        return [
+          setValue(`#${prefix}-location_place`, option.value),
+          setValue(`#${prefix}-location`, option.value),
+          setValue(`#${prefix}-location_place_preselection`, option.value)
+        ].every(Boolean);
+      };
 
-        const pickupDateSet = setInputValue("#pickup-date", pickupDate);
-        const dropoffDateSet = setInputValue("#return-date", dropoffDate);
-        const pickupTimeSet = setSelectValue("#time_range-time_start", pickupTime, "#select2-time_range-time_start-container");
-        const dropoffTimeSet = setSelectValue("#time_range-time_end", dropoffTime, "#select2-time_range-time_end-container");
-        const sortOrderSet = setHiddenValue("#results_order", sortOrder);
-
-        return {
-          ok: Boolean(pickup && dropoff && pickupDateSet && dropoffDateSet && pickupTimeSet && dropoffTimeSet),
-          pickup,
-          dropoff,
-          pickupDateSet,
-          dropoffDateSet,
-          pickupTimeSet,
-          dropoffTimeSet,
-          sortOrderSet
-        };
-      },
-      {
-        locationText: target.location,
-        locationValue: target.value || "",
+      return [
+        chooseLocation("pickup"),
+        chooseLocation("return"),
+        setValue("#pickup-date", config.pickupDate),
+        setValue("#return-date", config.dropoffDate),
+        setValue("#time_range-time_start", config.pickupTime),
+        setValue("#time_range-time_end", config.dropoffTime),
+        setValue("#results_order", target.sortOrder)
+      ].every(Boolean);
+    }, {
+      target,
+      config: {
         pickupDate: this.config.pickupDate,
         dropoffDate: this.config.dropoffDate,
         pickupTime: this.config.pickupTime,
-        dropoffTime: this.config.dropoffTime,
-        sortOrder: target.sortOrder || "suggested"
+        dropoffTime: this.config.dropoffTime
       }
-    ).catch(() => ({ ok: false }));
-
-    if (!selected?.ok) {
-      return false;
-    }
-
-    await page.waitForTimeout(300);
-    return true;
-  }
-
-  async tryFillDateAndTimeInForm(page) {
-    const steps = [
-      () => this.setDateRange(page, this.config.pickupDate, this.config.dropoffDate),
-      () => this.setTime(page, this.config.pickupTime, 0),
-      () => this.setTime(page, this.config.dropoffTime, 1)
-    ];
-
-    for (const step of steps) {
-      await step().catch(() => {});
-    }
-  }
-
-  async setPickupLocation(page, location) {
-    await this.acceptCookies(page);
-
-    const inputCandidates = [
-      page.getByPlaceholder(/enter airport or city/i).first(),
-      page.getByPlaceholder(/punkt odbioru/i).first(),
-      page.getByPlaceholder(/miejsce odbioru/i).first(),
-      page.getByPlaceholder(/pick-up location/i).first(),
-      page.getByLabel(/punkt odbioru/i).first(),
-      page.getByLabel(/miejsce odbioru/i).first(),
-      page.getByLabel(/pick-up location/i).first(),
-      page.locator("input[placeholder*='Punkt']").first(),
-      page.locator("input[placeholder*='Pick-up']").first(),
-      page.locator("input:not([readonly])[name*='pickup' i]:not([name*='date' i]), input:not([readonly])[name*='odbior' i], input:not([readonly])[name*='from' i]").first(),
-      page.locator("input:not([readonly])[name*='pick' i]:not([name*='date' i])").first(),
-      page.locator("input:not([readonly]):not([type='hidden']):not([type='submit']):not([type='button']):not([id*='date' i]):not([name*='date' i])").first()
-    ];
-
-    let input = null;
-    for (const candidate of inputCandidates) {
-      if (await candidate.isVisible().catch(() => false)) {
-        input = candidate;
-        break;
-      }
-    }
-
-    if (!input) {
-      const trigger = page.getByText(/punkt odbioru|miejsce odbioru|pick-up location/i).first();
-      if (await trigger.isVisible().catch(() => false)) {
-        await trigger.click({ timeout: 3000 });
-      }
-
-      for (const candidate of inputCandidates) {
-        if (await candidate.isVisible().catch(() => false)) {
-          input = candidate;
-          break;
-        }
-      }
-    }
-
-    if (!input) {
-      throw new Error("Could not find the pick-up location input.");
-    }
-
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      await input.click({ timeout: 5000, force: true }).catch(() => {});
-      await input.focus().catch(() => {});
-      await input.press("Control+A").catch(() => {});
-      await input.fill("");
-      await input.type(location, { delay: 80 });
-      await page.waitForTimeout(1000);
-
-      const selected = await this.chooseAutocompleteOption(page, location, input);
-      if (!selected) {
-        continue;
-      }
-
-      const looksValid = await this.locationSelectionLooksValid(page, input, location);
-      if (looksValid) {
-        return;
-      }
-    }
-
-    throw new Error(`Could not select pick-up location "${location}" from autocomplete.`);
-  }
-
-  async chooseAutocompleteOption(page, location, input) {
-    const escapedLocation = escapeRegExp(location);
-    const exactishPattern = new RegExp(escapedLocation, "i");
-    const allLocationsPattern = new RegExp(`${escapedLocation}.*all locations`, "i");
-    const autocompleteItemSelector = ".Autocomplete-AutocompleteItem, [class*='AutocompleteItem'], .select2-results__option, .ui-menu-item, [class*='autocomplete' i], [class*='suggest' i], [role='option']";
-    const optionCandidates = [
-      page.locator(autocompleteItemSelector).filter({ hasText: allLocationsPattern }).first(),
-      page.locator(autocompleteItemSelector).filter({ hasText: exactishPattern }).first(),
-      page.locator(autocompleteItemSelector).first(),
-      page.getByRole("option", { name: exactishPattern }).first(),
-      page.locator("[role='option']").filter({ hasText: exactishPattern }).first(),
-      page.locator("li").filter({ hasText: exactishPattern }).first(),
-      page.locator("[class*='option']").filter({ hasText: exactishPattern }).first(),
-      page.locator("[class*='suggest']").filter({ hasText: exactishPattern }).first()
-    ];
-
-    for (const option of optionCandidates) {
-      if (await option.isVisible().catch(() => false)) {
-        await option.click({ timeout: 5000, force: true }).catch(() => {});
-        await page.waitForTimeout(500);
-        const pickerStillVisible = await page.locator(autocompleteItemSelector).first().isVisible().catch(() => false);
-        if (!pickerStillVisible) {
-          return true;
-        }
-      }
-    }
-
-    await input.press("ArrowDown").catch(() => {});
-    await page.waitForTimeout(200);
-    await input.press("Enter").catch(() => {});
-    await page.waitForTimeout(500);
-    return await this.locationSelectionLooksValid(page, input, location);
-  }
-
-  async locationSelectionLooksValid(page, input, expectedLocation) {
-    const value = normalizeWhitespace(await input.inputValue().catch(() => ""));
-    const hasErrorClass = await input.evaluate((element) => {
-      if (!(element instanceof HTMLElement)) {
-        return false;
-      }
-      return element.classList.contains("Autocomplete-EnterLocation_hasError") || element.getAttribute("aria-invalid") === "true";
-    }).catch(() => false);
-
-    const hasValidationError = await this.hasPickupLocationValidationError(page);
-    const hasAnyValue = Boolean(value);
-    const valueLooksReasonable = hasAnyValue && new RegExp(escapeRegExp(expectedLocation), "i").test(value);
-
-    return !hasErrorClass && !hasValidationError && (valueLooksReasonable || hasAnyValue);
-  }
-
-  async hasPickupLocationValidationError(page) {
-    const inlineError = page
-      .locator(".SearchModifier-Errors_isVisible .SearchModifier-Error")
-      .filter({ hasText: PICKUP_VALIDATION_ERROR_PATTERN })
-      .first();
-    return await inlineError.isVisible().catch(() => false);
-  }
-
-  async setDateRange(page, pickupDate, dropoffDate) {
-    if (await this.fillNativeDateInputs(page, pickupDate, dropoffDate)) {
-      return;
-    }
-
-    await this.openCalendarFor(page, "pickup", 0);
-    await page.waitForFunction(() => {
-      const wrapper = document.querySelector(".DatePicker-CalendarWrapper_isVisible");
-      return Boolean(wrapper);
-    }, null, {
-      timeout: 10000
     });
-    await this.selectDateFromRangePicker(page, pickupDate);
-    await page.waitForTimeout(250);
-    await this.selectDateFromRangePicker(page, dropoffDate);
-    await page.waitForTimeout(500);
-  }
-
-  async fillNativeDateInputs(page, pickupDate, dropoffDate) {
-    const values = [pickupDate, dropoffDate];
-    const selectors = [
-      "input[type='date']",
-      "input[name*='date' i]",
-      "input[name*='data' i]",
-      "input[id*='date' i]",
-      "input[id*='data' i]"
-    ];
-    const inputs = page.locator(selectors.join(","));
-    const count = await inputs.count().catch(() => 0);
-    if (count < 2) {
-      return false;
-    }
-
-    let filled = 0;
-    for (let index = 0; index < Math.min(count, 2); index += 1) {
-      const input = inputs.nth(index);
-      if (!(await input.isVisible().catch(() => false))) {
-        continue;
-      }
-      const value = values[index];
-      const typed = await input.fill(value, { timeout: 3000 }).then(() => true).catch(() => false);
-      if (!typed) {
-        continue;
-      }
-      await input.evaluate((element) => {
-        element.dispatchEvent(new Event("input", { bubbles: true }));
-        element.dispatchEvent(new Event("change", { bubbles: true }));
-      }).catch(() => {});
-      filled += 1;
-    }
-
-    return filled >= 2;
-  }
-
-  async openCalendarFor(page, kind, locationIndex) {
-    await this.acceptCookies(page);
-
-    const patterns = kind === "pickup"
-      ? [/data odbioru/i, /pick-up date/i, /pickup date/i]
-      : [/data zwrotu/i, /drop-off date/i, /dropoff date/i];
-
-    const candidates = [
-      page.locator(".DatePicker-CalendarField").nth(locationIndex),
-      page.locator("input[type='text'], input[type='date']").nth(locationIndex + 1),
-      ...patterns.map((pattern) => page.getByText(pattern).nth(0)),
-      ...patterns.map((pattern) => page.getByLabel(pattern).first()),
-      page.locator("[data-testid*='date']").nth(locationIndex),
-      page.locator("button, div").filter({ hasText: patterns[0] }).nth(0)
-    ];
-
-    for (const candidate of candidates) {
-      if (await candidate.isVisible().catch(() => false)) {
-        await candidate.click({ timeout: 4000, force: true }).catch(() => {});
-        await page.waitForTimeout(600);
-        return;
-      }
-    }
-
-    throw new Error(`Could not open the ${kind} date picker.`);
-  }
-
-  async selectDateFromRangePicker(page, dateValue) {
-    const dateParts = parseDate(dateValue, "date");
-    const monthLabel = `${monthName(dateParts)} ${dateParts.year}`;
-
-    for (let step = 0; step < 18; step += 1) {
-      const monthVisible = await page
-        .locator(".rdrMonth, .Calendar-NavigationMonth")
-        .filter({ hasText: new RegExp(escapeRegExp(monthLabel), "i") })
-        .first()
-        .isVisible()
-        .catch(() => false);
-      if (monthVisible) {
-        break;
-      }
-      const moved = await this.clickNextMonth(page);
-      if (!moved) {
-        break;
-      }
-      await page.waitForTimeout(250);
-    }
-
-    const clicked = await page.evaluate(
-      ({ targetMonthLabel, targetDay }) => {
-        const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
-        const months = Array.from(document.querySelectorAll(".rdrMonth"));
-        const month = months.find((item) => normalize(item.textContent).includes(targetMonthLabel));
-        if (!month) {
-          return false;
-        }
-
-        const dayButtons = Array.from(
-          month.querySelectorAll("button.rdrDay:not(.rdrDayPassive):not(.rdrDayDisabled)")
-        );
-        const dayButton = dayButtons.find(
-          (button) => normalize(button.textContent) === String(targetDay)
-        );
-        if (!dayButton) {
-          return false;
-        }
-
-        dayButton.click();
-        return true;
-      },
-      { targetMonthLabel: monthLabel, targetDay: dateParts.day }
-    );
-
-    if (clicked) {
-      await page.waitForTimeout(400);
-      return;
-    }
-
-    const labels = toAccessibleDateLabels(dateParts);
-    for (const label of labels) {
-      const exactButton = page.getByRole("button", { name: new RegExp(escapeRegExp(label), "i") }).first();
-      if (await exactButton.isVisible().catch(() => false)) {
-        await exactButton.click({ timeout: 3000 }).catch(() => {});
-        await page.waitForTimeout(500);
-        return;
-      }
-    }
-
-    throw new Error(`Could not select calendar date ${dateValue}.`);
-  }
-
-  async clickNextMonth(page) {
-    const candidates = [
-      page.getByRole("button", { name: /nast(?:e|\u0119)pny|next month/i }).first(),
-      page.getByRole("button", { name: /next/i }).first(),
-      page.locator("[aria-label*='Next']").first(),
-      page.locator("button").filter({ hasText: /^>$/ }).first()
-    ];
-
-    for (const candidate of candidates) {
-      if (await candidate.isVisible().catch(() => false)) {
-        await candidate.click({ timeout: 3000 }).catch(() => {});
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  async setTime(page, time, locationIndex) {
-    await this.acceptCookies(page);
-
-    const exactPattern = new RegExp(`^${escapeRegExp(time)}$`);
-
-    const comboboxes = [
-      page.getByRole("combobox", { name: /time/i }).nth(locationIndex),
-      page.getByRole("combobox", { name: /godzina/i }).nth(locationIndex),
-      page.locator("select").nth(locationIndex),
-      page.locator("[role='combobox']").nth(locationIndex)
-    ];
-
-    for (const combobox of comboboxes) {
-      if (!(await combobox.isVisible().catch(() => false))) {
-        continue;
-      }
-
-      const selected = await combobox.selectOption({ label: time }).then(() => true).catch(() => false);
-      if (selected) {
-        await page.waitForTimeout(200);
-        return;
-      }
-
-      const clicked = await combobox.click({ timeout: 3000 }).then(() => true).catch(() => false);
-      if (clicked) {
-        const option = page.getByRole("option", { name: exactPattern }).first();
-        if (await option.isVisible().catch(() => false)) {
-          await option.click({ timeout: 3000 }).catch(() => {});
-          await page.waitForTimeout(300);
-          return;
-        }
-      }
-    }
-
-    const timeText = page.getByText(exactPattern).nth(locationIndex);
-    if (await timeText.isVisible().catch(() => false)) {
-      await timeText.click({ timeout: 3000 }).catch(() => {});
-    }
-  }
-
-  async setResidenceCountry(page, residenceCountry) {
-    await this.acceptCookies(page);
-
-    const comboboxes = [
-      page.getByRole("combobox", { name: /country of residence/i }).first(),
-      page.getByLabel(/country of residence/i).first(),
-      page.locator("select").filter({ hasText: /poland|united kingdom|united states/i }).nth(0)
-    ];
-
-    for (const combobox of comboboxes) {
-      if (!(await combobox.isVisible().catch(() => false))) {
-        continue;
-      }
-
-      const selected = await combobox.selectOption({ label: residenceCountry }).then(() => true).catch(() => false);
-      if (selected) {
-        await page.waitForTimeout(200);
-        return;
-      }
-
-      const clicked = await combobox.click({ timeout: 3000 }).then(() => true).catch(() => false);
-      if (!clicked) {
-        continue;
-      }
-
-      const option = page.getByRole("option", { name: new RegExp(escapeRegExp(residenceCountry), "i") }).first();
-      if (await option.isVisible().catch(() => false)) {
-        await option.click({ timeout: 3000 }).catch(() => {});
-        await page.waitForTimeout(300);
-        return;
-      }
-    }
-  }
-
-  async setDriverAge(page, driverAge) {
-    await this.acceptCookies(page);
-
-    const ageText = driverAge >= 30 && driverAge <= 65 ? "30-65" : String(driverAge);
-    const comboboxes = [
-      page.getByRole("combobox", { name: /age/i }).first(),
-      page.getByLabel(/age/i).first(),
-      page.locator("select").nth(1)
-    ];
-
-    for (const combobox of comboboxes) {
-      if (!(await combobox.isVisible().catch(() => false))) {
-        continue;
-      }
-
-      const selected = await combobox.selectOption({ label: ageText }).then(() => true).catch(() => false);
-      if (selected) {
-        await page.waitForTimeout(200);
-        return;
-      }
-
-      const clicked = await combobox.click({ timeout: 3000 }).then(() => true).catch(() => false);
-      if (!clicked) {
-        continue;
-      }
-
-      const option = page.getByRole("option", { name: new RegExp(`^${escapeRegExp(ageText)}$`) }).first();
-      if (await option.isVisible().catch(() => false)) {
-        await option.click({ timeout: 3000 }).catch(() => {});
-        await page.waitForTimeout(300);
-        return;
-      }
+    if (!filled) {
+      throw new Error(`Could not fill the RentCars search form for "${target.location}".`);
     }
   }
 
   async submitSearch(page) {
-    await this.acceptCookies(page);
-    await this.dismissObstructiveOverlays(page);
-
-    const directButtons = [
-      page.locator("#elementsubmit").first(),
-      page.locator("button[name='elementsubmit']").first(),
-      page.locator("#form-cars-search button").filter({ hasText: /szukaj/i }).first()
-    ];
-
-    for (const button of directButtons) {
-      if (await button.isVisible().catch(() => false)) {
-        await Promise.allSettled([
-          page.waitForLoadState("domcontentloaded", { timeout: this.config.timeoutMs }),
-          button.click({ timeout: 4000, force: true })
-        ]);
-        await page.waitForTimeout(1200);
-        if (await this.looksLikeSearchPage(page)) {
-          return;
-        }
-        if (await this.hasPickupLocationValidationError(page)) {
-          throw new Error("Pick-up location was not accepted by RentCars.pl.");
-        }
-      }
-    }
-
-    for (const pattern of SEARCH_BUTTON_PATTERNS) {
-      const button = page.getByRole("button", { name: pattern }).first();
-      if (await button.isVisible().catch(() => false)) {
-        await Promise.allSettled([
-          page.waitForLoadState("domcontentloaded", { timeout: this.config.timeoutMs }),
-          button.click({ timeout: 4000 })
-        ]);
-        await page.waitForTimeout(800);
-        if (!(await this.looksLikeSearchPage(page)) && (await this.hasPickupLocationValidationError(page))) {
-          throw new Error("Pick-up location was not accepted by RentCars.pl.");
-        }
-        return;
-      }
-    }
-
-    const fallback = page.locator("button, a").filter({ hasText: /search/i }).first();
-    if (await fallback.isVisible().catch(() => false)) {
-      await Promise.allSettled([
-        page.waitForLoadState("domcontentloaded", { timeout: this.config.timeoutMs }),
-        fallback.click({ timeout: 4000 })
-      ]);
-      await page.waitForTimeout(800);
-      if (!(await this.looksLikeSearchPage(page)) && (await this.hasPickupLocationValidationError(page))) {
-        throw new Error("Pick-up location was not accepted by RentCars.pl.");
-      }
-      return;
-    }
-
-    throw new Error("Could not find the RentCars.pl search button.");
+    const origin = new URL(this.config.baseUrl).origin;
+    // Native submission avoids racing the site's asynchronously loaded click handler.
+    await Promise.all([
+      page.waitForURL((url) => url.origin === origin && /^\/(?:pl\/)?szukaj\/[a-z0-9]+\.html$/i.test(url.pathname), {
+        timeout: this.config.timeoutMs,
+        waitUntil: "domcontentloaded"
+      }),
+      page.locator("#form-cars-search").evaluate((form) => form.requestSubmit())
+    ]);
   }
 
   async waitForResults(page) {
@@ -1334,14 +663,6 @@ class RentCarsScraper {
     const seenUrls = new Set([page.url()]);
 
     for (let pageIndex = 0; pageIndex < maxAdditionalPages; pageIndex += 1) {
-      const combinedOffers = dedupeOffers([
-        ...collector.getOffers(),
-        ...accumulatedOffers
-      ]);
-      if (hasMmCarsOffer(combinedOffers)) {
-        return true;
-      }
-
       const control = await this.findLoadMoreControl(page);
       if (!control) {
         return true;
@@ -1534,41 +855,6 @@ class RentCarsScraper {
     return true;
   }
 
-  async ensureConfiguredSearchPeriod(page) {
-    return;
-  }
-
-  async findSearchUrl(page) {
-    const current = page.url();
-    if (/\/search\/[0-9a-f-]{36}/i.test(current) && /[?&]sq=/i.test(current)) {
-      return current;
-    }
-
-    return "";
-  }
-
-  async looksLikeSearchPage(page) {
-    const url = page.url();
-    if (/\/search\/[0-9a-f-]{36}/i.test(url) && /[?&]sq=/i.test(url)) {
-      return true;
-    }
-    if (/\/(?:pl\/)?szukaj\/[a-z0-9]+\.html/i.test(url)) {
-      return true;
-    }
-
-    const resultItem = page.locator(".car-search-result-item").first();
-    if (await resultItem.isVisible().catch(() => false)) {
-      return true;
-    }
-
-    const loadingSignal = page.getByText(/searching 1,000\+ car rental brands|wyszukiwanie|szukamy/i).first();
-    if (await loadingSignal.isVisible().catch(() => false)) {
-      return true;
-    }
-
-    const sortBySignal = page.getByText(/sort by|sortuj|sortowanie|sprawd(?:z|\u017a) cen(?:e|\u0119)/i).first();
-    return await sortBySignal.isVisible().catch(() => false);
-  }
 
   async waitForLoadingScreenToFinish(page) {
     const loadingText = page.getByText(/Searching 1,000\+ car rental brands|wyszukiwanie|szukamy/i).first();
@@ -2296,12 +1582,6 @@ function resolveProtectedPriceMoney(basePriceMoney, explicitProtectedPriceMoney,
   };
 }
 
-function monthName(dateParts) {
-  return new Intl.DateTimeFormat("en-US", {
-    month: "long",
-    timeZone: "UTC"
-  }).format(new Date(Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day)));
-}
 
 function dedupeOffers(offers) {
   const seen = new Set();
@@ -2663,28 +1943,6 @@ function normalizeRentCarsProviderName(value) {
   return name;
 }
 
-function normalizeCurrencyLegacy(value) {
-  if (!value) {
-    return "";
-  }
-  if (value === "Z\u0141") {
-    return "PLN";
-  }
-  if (value === "$") {
-    return "USD";
-  }
-  if (value === "\u20ac") {
-    return "EUR";
-  }
-  if (value === "\u00a3") {
-    return "GBP";
-  }
-  return value;
-}
-
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 function firstExistingPath(candidates) {
   for (const candidate of candidates) {
@@ -2706,24 +1964,6 @@ function resolveUrl(value, baseUrl) {
   }
 }
 
-function dedupeLocationCandidates(candidates) {
-  const seen = new Set();
-  const unique = [];
-
-  for (const candidate of candidates) {
-    const placeId = Number.parseInt(candidate?.placeID, 10);
-    if (!Number.isFinite(placeId)) {
-      continue;
-    }
-    if (seen.has(placeId)) {
-      continue;
-    }
-    seen.add(placeId);
-    unique.push({ ...candidate, placeID: placeId });
-  }
-
-  return unique;
-}
 
 function normalizeCurrency(value) {
   if (!value) {
@@ -2746,60 +1986,6 @@ function normalizeCurrency(value) {
   return normalized;
 }
 
-function decodeSqPayload(rawSq) {
-  try {
-    const decoded = decodeURIComponent(String(rawSq));
-    const json = Buffer.from(decoded, "base64").toString("utf8");
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-}
-
-function encodeSqPayload(payload) {
-  const json = JSON.stringify(payload);
-  return encodeURIComponent(Buffer.from(json, "utf8").toString("base64"));
-}
-
-function normalizeCountryCode(value) {
-  const normalized = normalizeWhitespace(value).toUpperCase();
-  if (/^[A-Z]{2}$/.test(normalized)) {
-    return normalized;
-  }
-
-  const mapping = {
-    POLAND: "PL",
-    GERMANY: "DE",
-    FRANCE: "FR",
-    ITALY: "IT",
-    SPAIN: "ES",
-    PORTUGAL: "PT",
-    CZECHIA: "CZ",
-    "CZECH REPUBLIC": "CZ",
-    SLOVAKIA: "SK",
-    HUNGARY: "HU",
-    ROMANIA: "RO",
-    LITHUANIA: "LT",
-    LATVIA: "LV",
-    ESTONIA: "EE",
-    SWEDEN: "SE",
-    NORWAY: "NO",
-    DENMARK: "DK",
-    FINLAND: "FI",
-    IRELAND: "IE",
-    "UNITED KINGDOM": "GB",
-    UK: "GB",
-    "GREAT BRITAIN": "GB",
-    "UNITED STATES": "US",
-    USA: "US",
-    CANADA: "CA",
-    AUSTRALIA: "AU",
-    "NEW ZEALAND": "NZ",
-    NEWZEALAND: "NZ"
-  };
-
-  return mapping[normalized] || "";
-}
 
 module.exports = {
   RentCarsScraper,

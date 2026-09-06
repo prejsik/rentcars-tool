@@ -480,8 +480,6 @@ function loadConfig(argv) {
     durationDays,
     rollingDays,
     sortOrders,
-    residenceCountry: normalizeWhitespace(configValue(cli, fileConfig, ["residenceCountry", "residence-country"], "Poland")),
-    driverAge: Number.parseInt(configValue(cli, fileConfig, ["driverAge", "driver-age"], "30"), 10),
     maxProvidersPerLocation: Number.parseInt(
       configValue(cli, fileConfig, ["maxProvidersPerLocation", "max-providers-per-location"], "25"),
       10
@@ -544,8 +542,6 @@ Options:
   --max-providers-per-location NUMBER
   --max-additional-result-pages NUMBER
   --location-concurrency NUMBER
-  --residence-country TEXT
-  --driver-age NUMBER
   --output-csv PATH
   --artifacts-dir PATH
   --browser-executable-path PATH

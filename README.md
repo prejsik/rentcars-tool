@@ -5,13 +5,15 @@ This is a separate RentCars.pl scraper module based on the DiscoverCars scraper 
 ## Features
 
 - opens RentCars.pl and fills the rental search form with Playwright
+- submits the native RentCars form and requires a results URL before collecting offers
+- rejects missing search fields or an airport label/ID mismatch instead of guessing another location
 - accepts multiple cities in one run and expands each city to matching RentCars.pl airport pickup points
 - keeps cities, airport labels, and RentCars.pl IDs in `src/rentcars/locations.json`
 - supports rolling pickup start dates, specific start dates, pickup weekdays, and duration scenarios
 - checks RentCars.pl only with the `price_insurance` sort mode
 - collects all cars by default and lets the HTML report switch between all cars and automatic transmission only
 - requires a verified protected price in `price_insurance` mode and records base and insured prices separately
-- loads the next "show more cars" result page when fewer than 3 providers are visible
+- loads additional "show more cars" pages up to the configured limit, even when MM is already visible
 - in fast mode, prefers visible DOM offers and avoids long waits for optional network JSON payloads
 - retries transient location failures twice in a lower-concurrency queue
 - reports successful, failed, and missing airport checks separately from scenario progress
@@ -63,6 +65,16 @@ Generate the Excel pricing summary:
 ```powershell
 node .\src\rentcars\reportXlsx.js .\output\rentcars-results-latest.json .\output\rentcars-summary.xlsx
 ```
+
+## Search Form Checks
+
+Search-form regression checks use a local browser fixture without contacting RentCars:
+
+```powershell
+node tests/run-search-form-tests.js
+```
+
+They require Chrome/Edge installed locally, or Playwright Chromium (`npx playwright install chromium`).
 
 ## GitHub Actions
 
@@ -133,7 +145,6 @@ node .\src\rentcars\cli.js --config .\rentcars.config.example.json --headed
 - GitHub runs that workflow in the cloud, so the local laptop does not need to be turned on.
 - The RentCars.pl workflow uploads `rentcars-results-latest.json`, `rentcars-report.html`, `rentcars-run-log.txt`, `rentcars-run-error.txt`, and failure artifacts.
 - If RentCars.pl changes the form, the main places to adjust are:
-  - `setPickupLocation`
-  - `chooseAutocompleteOption`
-  - `setDateRange`
+  - `fillSearchForm`
+  - `submitSearch`
   - `extractOffersFromDom`

@@ -74,37 +74,6 @@ function makeTimestampForFile(date = new Date()) {
   return `${year}${month}${day}-${hours}${minutes}${seconds}`;
 }
 
-function toMonthName(dateParts) {
-  return new Intl.DateTimeFormat("en-US", { month: "long", timeZone: "UTC" }).format(
-    new Date(Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day))
-  );
-}
-
-function toWeekdayShort(dateParts) {
-  return new Intl.DateTimeFormat("en-US", { weekday: "short", timeZone: "UTC" }).format(
-    new Date(Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day))
-  );
-}
-
-function toAccessibleDateLabels(dateParts) {
-  const monthName = toMonthName(dateParts);
-  const weekdayShort = toWeekdayShort(dateParts);
-  const day = String(dateParts.day);
-  const paddedDay = String(dateParts.day).padStart(2, "0");
-  const year = String(dateParts.year);
-  const shortMonth = monthName.slice(0, 3);
-
-  return uniqueStrings([
-    `${monthName} ${day}, ${year}`,
-    `${monthName} ${paddedDay}, ${year}`,
-    `${day} ${monthName} ${year}`,
-    `${paddedDay} ${monthName} ${year}`,
-    `${weekdayShort}, ${monthName} ${day}, ${year}`,
-    `${weekdayShort}, ${shortMonth} ${day}, ${year}`,
-    `${year}-${String(dateParts.month).padStart(2, "0")}-${paddedDay}`
-  ]);
-}
-
 function parseMoney(rawValue, fallbackCurrency = "") {
   if (rawValue == null) {
     return null;
@@ -277,7 +246,6 @@ module.exports = {
   parseMoney,
   parseTime,
   safeFilePart,
-  toAccessibleDateLabels,
   toCsv,
   uniqueStrings,
   writeTextFile
