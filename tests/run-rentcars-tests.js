@@ -74,6 +74,7 @@ runTest("shared location catalog is the default and includes nine airport checks
 
   assert.deepEqual(config.locations, defaultLocationCities());
   assert.equal(expectedAirportCount(config.locations), 9);
+  assert.equal(config.locationConcurrency, 6);
 });
 
 runTest("loadConfig supports one rolling start date and duration 2", () => {
