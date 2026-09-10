@@ -33,6 +33,11 @@ const RENTCARS_SORT_OPTIONS = new Map([
   ["price", { order: "price", label: "po cenie", priceMode: "base" }],
   ["price_insurance", { order: "price_insurance", label: "po cenie z ubezpieczeniem", priceMode: "insurance" }]
 ]);
+const VEHICLE_CATEGORY_VALUES = new Map([
+  ["premium", "5"],
+  ["van", "9"],
+  ["minivan", "11"]
+]);
 
 function clampPositiveInteger(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const parsed = Number.parseInt(value, 10);
@@ -292,6 +297,16 @@ class RentCarsScraper {
       await this.fillSearchForm(page, target);
       await this.submitSearch(page);
       await this.waitForResults(page);
+      if (Array.isArray(this.config.vehicleCategories) && this.config.vehicleCategories.length) {
+        await this.acceptCookies(page);
+        await this.dismissObstructiveOverlays(page);
+        const categoriesApplied = await this.applyVehicleCategoryFilter(page);
+        if (!categoriesApplied) {
+          throw new Error(`Could not apply vehicle categories: ${this.config.vehicleCategories.join(", ")}`);
+        }
+        responseCollector.clear();
+        console.log(`FLT ${formatSearchTarget(target)} -> vehicle categories: ${this.config.vehicleCategories.join(", ")}`);
+      }
       if (this.prefersAutomaticTransmission()) {
         responseCollector.clear();
         if (await this.applyAutomaticTransmissionFilter(page)) {
@@ -582,13 +597,16 @@ class RentCarsScraper {
   async submitSearch(page) {
     const origin = new URL(this.config.baseUrl).origin;
     // Native submission avoids racing the site's asynchronously loaded click handler.
-    await Promise.all([
-      page.waitForURL((url) => url.origin === origin && /^\/(?:pl\/)?szukaj\/[a-z0-9]+\.html$/i.test(url.pathname), {
-        timeout: this.config.timeoutMs,
-        waitUntil: "domcontentloaded"
-      }),
-      page.locator("#form-cars-search").evaluate((form) => form.requestSubmit())
-    ]);
+    await page.locator("#form-cars-search").evaluate((form) => form.requestSubmit());
+    const deadline = Date.now() + this.config.timeoutMs;
+    while (Date.now() < deadline) {
+      const url = new URL(page.url());
+      if (url.origin === origin && /^\/(?:pl\/)?szukaj\/[a-z0-9]+\.html$/i.test(url.pathname)) {
+        return;
+      }
+      await page.waitForTimeout(100);
+    }
+    throw new Error(`Search form did not navigate to a RentCars results URL. Current URL: ${page.url()}`);
   }
 
   async waitForResults(page) {
@@ -851,6 +869,46 @@ class RentCarsScraper {
     await page.waitForLoadState("domcontentloaded", { timeout: Math.min(this.config.timeoutMs, 10000) }).catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: this.collectorWaitTimeoutMs() + 3000 }).catch(() => {});
     await this.waitForLoadingScreenToFinish(page);
+    await page.waitForTimeout(this.isFastMode() ? 800 : 1500);
+    return true;
+  }
+
+  async applyVehicleCategoryFilter(page) {
+    const categories = [...new Set(this.config.vehicleCategories || [])];
+    if (!categories.length) {
+      return true;
+    }
+
+    for (const category of categories) {
+      const value = VEHICLE_CATEGORY_VALUES.get(category);
+      if (!value) {
+        return false;
+      }
+      const input = page.locator(`input[name='filters[car_category][]'][value='${value}']`).first();
+      if (!(await input.count().catch(() => 0))) {
+        return false;
+      }
+      if (!(await input.isChecked().catch(() => false))) {
+        const id = await input.getAttribute("id");
+        const label = id ? page.locator(`label[for='${id}']`).first() : null;
+        if (!label || !(await label.count().catch(() => 0))) {
+          return false;
+        }
+        await label.click({ force: true, timeout: Math.min(this.config.timeoutMs, 10000) });
+        await page.waitForLoadState("networkidle", { timeout: this.collectorWaitTimeoutMs() + 3000 }).catch(() => {});
+        await this.waitForLoadingScreenToFinish(page);
+      }
+    }
+
+    const selectedValues = await page
+      .locator("input[name='filters[car_category][]']:checked")
+      .evaluateAll((inputs) => inputs.map((input) => input.value))
+      .catch(() => []);
+    const expectedValues = categories.map((category) => VEHICLE_CATEGORY_VALUES.get(category));
+    if (!expectedValues.every((value) => selectedValues.includes(value))) {
+      return false;
+    }
+
     await page.waitForTimeout(this.isFastMode() ? 800 : 1500);
     return true;
   }

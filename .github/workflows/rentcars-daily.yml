@@ -27,6 +27,10 @@ on:
         description: "Comma-separated RentCars.pl sort modes"
         required: true
         default: "price_insurance"
+      vehicle_categories:
+        description: "Optional categories: premium, van, minivan, or bus"
+        required: false
+        default: ""
       location_concurrency:
         description: "Parallel RentCars.pl pickup locations per scenario"
         required: true
@@ -62,6 +66,7 @@ jobs:
       durations: ${{ steps.options.outputs.durations }}
       speed_mode: ${{ steps.options.outputs.speed_mode }}
       sort_orders: ${{ steps.options.outputs.sort_orders }}
+      vehicle_categories: ${{ steps.options.outputs.vehicle_categories }}
       location_concurrency: ${{ steps.options.outputs.location_concurrency }}
       chunk_timeout: ${{ steps.options.outputs.chunk_timeout }}
       expected_scenario_count: ${{ steps.options.outputs.expected_scenario_count }}
@@ -114,6 +119,7 @@ jobs:
           INPUT_DURATIONS: ${{ inputs.durations }}
           INPUT_SPEED_MODE: ${{ inputs.speed_mode }}
           INPUT_SORT_ORDERS: ${{ inputs.sort_orders }}
+          INPUT_VEHICLE_CATEGORIES: ${{ inputs.vehicle_categories }}
           INPUT_LOCATION_CONCURRENCY: ${{ inputs.location_concurrency }}
         run: |
           if [[ "${{ steps.gate.outputs.should_run }}" != "true" ]]; then
@@ -124,6 +130,7 @@ jobs:
             echo "durations=" >> "$GITHUB_OUTPUT"
             echo "speed_mode=fast" >> "$GITHUB_OUTPUT"
             echo "sort_orders=price_insurance" >> "$GITHUB_OUTPUT"
+            echo "vehicle_categories=" >> "$GITHUB_OUTPUT"
             echo "location_concurrency=1" >> "$GITHUB_OUTPUT"
             echo "chunk_timeout=1m" >> "$GITHUB_OUTPUT"
             echo "expected_scenario_count=0" >> "$GITHUB_OUTPUT"
@@ -138,6 +145,7 @@ jobs:
           durations="${INPUT_DURATIONS:-$SCHEDULE_DURATIONS}"
           speed_mode="${INPUT_SPEED_MODE:-$SCHEDULE_SPEED_MODE}"
           sort_orders="${INPUT_SORT_ORDERS:-$SCHEDULE_SORT_ORDERS}"
+          vehicle_categories="$INPUT_VEHICLE_CATEGORIES"
           location_concurrency="${INPUT_LOCATION_CONCURRENCY:-$SCHEDULE_LOCATION_CONCURRENCY}"
           chunk_timeout="$SCHEDULE_CHUNK_SCRAPER_TIMEOUT"
 
@@ -198,6 +206,7 @@ jobs:
           echo "durations=$durations" >> "$GITHUB_OUTPUT"
           echo "speed_mode=$speed_mode" >> "$GITHUB_OUTPUT"
           echo "sort_orders=$sort_orders" >> "$GITHUB_OUTPUT"
+          echo "vehicle_categories=$vehicle_categories" >> "$GITHUB_OUTPUT"
           echo "location_concurrency=$location_concurrency" >> "$GITHUB_OUTPUT"
           echo "chunk_timeout=$chunk_timeout" >> "$GITHUB_OUTPUT"
           echo "expected_scenario_count=$expected_scenario_count" >> "$GITHUB_OUTPUT"
@@ -208,6 +217,7 @@ jobs:
           echo "Locations: $locations"
           echo "Rolling days: $rolling_days"
           echo "Durations: $durations"
+          echo "Vehicle categories: ${vehicle_categories:-all}"
           echo "Expected scenarios: $expected_scenario_count"
           echo "Expected airport checks: $expected_check_count"
           echo "Dates per chunk: $chunk_size"
@@ -284,6 +294,11 @@ jobs:
           echo "Start dates: ${{ matrix.start_dates }}"
           echo "Chunk timeout: $chunk_timeout"
 
+          vehicle_category_args=()
+          if [[ -n "${{ needs.plan.outputs.vehicle_categories }}" ]]; then
+            vehicle_category_args+=(--vehicle-categories="${{ needs.plan.outputs.vehicle_categories }}")
+          fi
+
           set +e
           timeout --kill-after=30s "$chunk_timeout" node src/rentcars/run.js \
             --config rentcars.config.example.json \
@@ -291,6 +306,7 @@ jobs:
             --start-dates="${{ matrix.start_dates }}" \
             --durations-days="${{ needs.plan.outputs.durations }}" \
             --sort-orders="${{ needs.plan.outputs.sort_orders }}" \
+            "${vehicle_category_args[@]}" \
             --speed-mode="${{ needs.plan.outputs.speed_mode }}" \
             --location-concurrency="${{ needs.plan.outputs.location_concurrency }}" \
             --timeout-ms=30000 \
@@ -385,7 +401,8 @@ jobs:
             --started-at="${{ needs.plan.outputs.run_started_at }}" \
             --base-url=https://rentcars.pl \
             --locations="${{ needs.plan.outputs.locations }}" \
-            --sort-orders="${{ needs.plan.outputs.sort_orders }}"
+            --sort-orders="${{ needs.plan.outputs.sort_orders }}" \
+            --vehicle-categories="${{ needs.plan.outputs.vehicle_categories }}"
 
       - name: Generate RentCars.pl HTML report
         id: report

@@ -15,7 +15,8 @@ function parseCliArgs(argv) {
     durationDays: [],
     pickupWeekdays: [],
     startDates: [],
-    sortOrders: []
+    sortOrders: [],
+    vehicleCategories: []
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -109,6 +110,18 @@ function parseCliArgs(argv) {
 
     if (key === "sort-orders") {
       args.sortOrders.push(
+        ...nextValue.split(",").map((item) => item.trim()).filter(Boolean)
+      );
+      continue;
+    }
+
+    if (key === "vehicle-category") {
+      args.vehicleCategories.push(nextValue);
+      continue;
+    }
+
+    if (key === "vehicle-categories") {
+      args.vehicleCategories.push(
         ...nextValue.split(",").map((item) => item.trim()).filter(Boolean)
       );
       continue;
@@ -239,6 +252,36 @@ function parseTransmissionInput(rawValue, fieldName) {
     throw new Error(`${fieldName} contains unsupported transmission: ${rawValue}`);
   }
   return value;
+}
+
+function parseVehicleCategoriesInput(rawValue, fieldName) {
+  if (rawValue == null) {
+    return [];
+  }
+
+  const parts = Array.isArray(rawValue)
+    ? rawValue.flatMap((item) => String(item).split(","))
+    : String(rawValue).split(",");
+  const aliases = new Map([
+    ["premium", ["premium"]],
+    ["van", ["van"]],
+    ["minivan", ["minivan"]],
+    ["bus", ["van", "minivan"]],
+    ["busy", ["van", "minivan"]]
+  ]);
+  const values = [];
+  for (const part of parts) {
+    const normalized = normalizeWhitespace(part).toLowerCase();
+    if (!normalized) {
+      continue;
+    }
+    const categories = aliases.get(normalized);
+    if (!categories) {
+      throw new Error(`${fieldName} contains unsupported vehicle category: ${part}`);
+    }
+    values.push(...categories);
+  }
+  return [...new Set(values)];
 }
 
 function normalizeDayToken(rawValue) {
@@ -466,6 +509,12 @@ function loadConfig(argv) {
   const sortOrders = configuredSortOrders.length
     ? [...new Set(configuredSortOrders)]
     : ["price_insurance"];
+  const vehicleCategories = parseVehicleCategoriesInput(
+    cli.vehicleCategories.length
+      ? cli.vehicleCategories
+      : fileConfig.vehicleCategories ?? fileConfig["vehicle-categories"],
+    "vehicleCategories"
+  );
 
   const defaultCsvName = `rentcars-results-${makeTimestampForFile()}.csv`;
 
@@ -480,6 +529,7 @@ function loadConfig(argv) {
     durationDays,
     rollingDays,
     sortOrders,
+    vehicleCategories,
     maxProvidersPerLocation: Number.parseInt(
       configValue(cli, fileConfig, ["maxProvidersPerLocation", "max-providers-per-location"], "25"),
       10
@@ -538,6 +588,7 @@ Options:
   --durations-days "2,3,4"    Multiple rental lengths in days
   --duration-days NUMBER       Repeatable shortcut
   --sort-orders "suggested,price,price_insurance"
+  --vehicle-categories "premium,bus"
   --transmission "automatic|manual|any"
   --max-providers-per-location NUMBER
   --max-additional-result-pages NUMBER

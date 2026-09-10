@@ -163,6 +163,16 @@ runTest("CLI transmission accepts the all-cars mode", () => {
   assert.equal(config.transmission, "any");
 });
 
+runTest("CLI vehicle category bus expands to van and minivan", () => {
+  const config = loadConfig([
+    "--config=rentcars.config.example.json",
+    "--locations=Warszawa",
+    "--vehicle-categories=premium,bus"
+  ]);
+
+  assert.deepEqual(config.vehicleCategories, ["premium", "van", "minivan"]);
+});
+
 runTest("toCsv writes RentCars pickup and sort metadata", () => {
   const csv = toCsv([
     {
@@ -375,21 +385,23 @@ runAsyncTest("search uses the RentCars form without speculative navigation", asy
 });
 
 runAsyncTest("form submission requires a RentCars results URL", async () => {
-  const scraper = new RentCarsScraper({ baseUrl: "https://rentcars.pl", timeoutMs: 1000 });
+  const scraper = new RentCarsScraper({ baseUrl: "https://rentcars.pl", timeoutMs: 10 });
   let submitted = false;
+  let currentUrl = "https://rentcars.pl/";
   await scraper.submitSearch({
-    waitForURL: async (matches) => {
-      assert.equal(matches(new URL("https://rentcars.pl/")), false);
-      assert.equal(matches(new URL("https://other.example/pl/szukaj/abc.html")), false);
-      assert.equal(matches(new URL("https://rentcars.pl/pl/szukaj/abc123.html")), true);
-    },
-    locator: () => ({ evaluate: async (submit) => submit({ requestSubmit: () => { submitted = true; } }) })
+    url: () => currentUrl,
+    waitForTimeout: async () => {},
+    locator: () => ({ evaluate: async (submit) => submit({ requestSubmit: () => {
+      submitted = true;
+      currentUrl = "https://rentcars.pl/pl/szukaj/abc123.html";
+    } }) })
   });
   assert.equal(submitted, true);
   await assert.rejects(scraper.submitSearch({
-    waitForURL: async () => { throw new Error("navigation timed out"); },
+    url: () => "https://other.example/pl/szukaj/abc.html",
+    waitForTimeout: async () => {},
     locator: () => ({ evaluate: async () => {} })
-  }), /navigation timed out/);
+  }), /did not navigate to a RentCars results URL/);
 });
 
 runTest("response collector keeps equal-price automatic and manual offers", () => {
@@ -606,6 +618,7 @@ runTest("buildHtmlReport renders RentCars title and top offer columns", () => {
   assert.match(html, /Top1: \+20 PLN\/d/);
   assert.match(html, /Top1: \+30 PLN\/d/);
   assert.match(html, /Execution duration: 1m 1s \(61000 ms\)/);
+  assert.match(html, /Vehicle categories: all/);
   assert.doesNotMatch(html, /Toyota Aygo/);
 });
 
@@ -1300,6 +1313,8 @@ runTest("daily schedule checks 60 rolling start dates for durations 2-14", () =>
 
   assert.match(daily, /^  SCHEDULE_ROLLING_DAYS: "60"$/m);
   assert.match(daily, /^  SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"$/m);
+  assert.match(daily, /^      vehicle_categories:$/m);
+  assert.match(daily, /--vehicle-categories="\$\{\{ needs\.plan\.outputs\.vehicle_categories \}\}"/);
   assert.match(rollingInput, /default: "60"/);
   assert.match(durationsInput, /default: "2,3,4,5,6,7,8,9,10,11,12,13,14"/);
 });
@@ -1424,6 +1439,7 @@ runTest("mergePayloads combines matrix chunks into one sorted root report", () =
     generatedAt: "2026-05-14T03:01:30.000Z",
     locations: ["Warszawa"],
     sortOrders: ["price_insurance"],
+    vehicleCategories: ["premium", "van", "minivan"],
     baseUrl: "https://rentcars.pl"
   });
 
@@ -1436,6 +1452,7 @@ runTest("mergePayloads combines matrix chunks into one sorted root report", () =
   assert.equal(payload.run_status, "complete");
   assert.equal(payload.is_partial, false);
   assert.equal(payload.execution_duration_ms, 90000);
+  assert.deepEqual(payload.vehicle_categories, ["premium", "van", "minivan"]);
   assert.deepEqual(payload.scenarios.map((scenario) => scenario.scenario_id), ["2026-06-01-2", "2026-06-02-3"]);
   assert.equal(payload.scenarios[0].results.length, 1);
 });

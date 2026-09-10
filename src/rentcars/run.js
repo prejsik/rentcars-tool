@@ -321,6 +321,7 @@ function buildRootPayload({
     locations: config.locations,
     sort_orders: config.sortOrders,
     transmission: config.transmission,
+    vehicle_categories: config.vehicleCategories || [],
     scenario_count: scenarios.length,
     expected_scenario_count: expectedScenarioCount,
     completed_scenario_count: scenarios.length,

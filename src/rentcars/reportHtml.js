@@ -452,6 +452,8 @@ function buildHtmlReport(payload) {
     ? `${Number(payload.successful_check_count || 0)} successful, ${Number(payload.failed_check_count || 0)} failed, ${Number(payload.missing_check_count || 0)} missing / ${Number(payload.expected_check_count)} checks`
     : "";
   const runStatus = payload.run_status || (payload.is_partial ? "partial" : "complete");
+  const vehicleCategories = Array.isArray(payload.vehicle_categories) ? payload.vehicle_categories : [];
+  const vehicleCategoryText = vehicleCategories.length ? vehicleCategories.join(", ") : "all";
   const statusNotice = runStatus === "partial"
     ? `<div class="notice">Partial report: ${escapeHtml(progressText)}. ${escapeHtml(checkProgressText)}</div>`
     : runStatus === "complete_with_errors"
@@ -773,7 +775,7 @@ function buildHtmlReport(payload) {
 </head>
 <body data-offer-view="all">
   <h1>RentCars.pl report</h1>
-  <div class="meta">Generated at: ${escapeHtml(generatedAt)} | Time zone: ${escapeHtml(payload.time_zone || "Europe/Warsaw")} | Source: ${escapeHtml(payload.source_url || "https://rentcars.pl")}</div>
+  <div class="meta">Generated at: ${escapeHtml(generatedAt)} | Time zone: ${escapeHtml(payload.time_zone || "Europe/Warsaw")} | Source: ${escapeHtml(payload.source_url || "https://rentcars.pl")} | Vehicle categories: ${escapeHtml(vehicleCategoryText)}</div>
   ${statusNotice}
   <div class="summary">Scenariusze: ${scenarios.length} | sprawdzenia lokalizacji: ${locationChecks} | brak MM Cars Rental: ${missingMm} | błędy: ${errorCount} | Top1 &gt; ${TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN} PLN/d: ${highTop1Count}</div>
   <div class="legend">

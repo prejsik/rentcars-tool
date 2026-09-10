@@ -26,6 +26,7 @@ function parseMergeArgs(argv) {
     baseUrl: "",
     locations: [],
     sortOrders: [],
+    vehicleCategories: [],
     help: false
   };
 
@@ -61,6 +62,8 @@ function parseMergeArgs(argv) {
       args.locations = parseCsv(readValue("--locations"));
     } else if (token === "--sort-orders" || token.startsWith("--sort-orders=")) {
       args.sortOrders = parseCsv(readValue("--sort-orders"));
+    } else if (token === "--vehicle-categories" || token.startsWith("--vehicle-categories=")) {
+      args.vehicleCategories = parseCsv(readValue("--vehicle-categories"));
     } else {
       throw new Error(`Unknown argument: ${token}`);
     }
@@ -411,6 +414,9 @@ function mergePayloads(entries, options = {}) {
     time_zone: firstPayload.time_zone || "Europe/Warsaw",
     locations: options.locations?.length ? options.locations : firstPayload.locations || [],
     sort_orders: options.sortOrders?.length ? options.sortOrders : firstPayload.sort_orders || ["price_insurance"],
+    vehicle_categories: options.vehicleCategories?.length
+      ? options.vehicleCategories
+      : firstPayload.vehicle_categories || [],
     scenario_count: scenarios.length,
     expected_scenario_count: expectedScenarioCount,
     completed_scenario_count: scenarios.length,
@@ -451,6 +457,7 @@ Options:
   --base-url URL
   --locations CSV
   --sort-orders CSV
+  --vehicle-categories CSV
 `);
 }
 

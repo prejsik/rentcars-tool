@@ -57,6 +57,19 @@ async function main() {
     await page.locator("#results_order").evaluate((input) => input.remove());
     await assert.rejects(scraper.fillSearchForm(page, target), /Could not fill/);
     console.log("PASS invalid airport, time, and missing sort field are rejected");
+
+    await page.setContent(`
+      <input type="checkbox" id="filters-car_category_5" name="filters[car_category][]" value="5"><label for="filters-car_category_5">premium</label>
+      <input type="checkbox" id="filters-car_category_9" name="filters[car_category][]" value="9"><label for="filters-car_category_9">van</label>
+      <input type="checkbox" id="filters-car_category_11" name="filters[car_category][]" value="11"><label for="filters-car_category_11">minivan</label>
+    `);
+    scraper.config = { ...config, vehicleCategories: ["premium", "van", "minivan"] };
+    assert.equal(await scraper.applyVehicleCategoryFilter(page), true);
+    assert.deepEqual(
+      await page.locator("input:checked").evaluateAll((inputs) => inputs.map((input) => input.value)),
+      ["5", "9", "11"]
+    );
+    console.log("PASS premium, van, and minivan filters are applied together");
   } finally {
     await browser.close();
   }
