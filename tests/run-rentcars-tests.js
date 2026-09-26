@@ -1331,6 +1331,12 @@ runTest("Excel summary contains all pricing and data-quality sheets", () => {
   ]);
   assert.ok(workbook.getWorksheet("Details").rowCount >= 5);
   assert.equal(workbook.getWorksheet("Overview").getCell("B5").value, "complete");
+  for (const sheet of workbook.worksheets.slice(1)) {
+    assert.equal(sheet.autoFilter, null, "Table filters must not overlap a worksheet AutoFilter");
+    const tables = sheet.getTables();
+    assert.equal(tables.length, 1);
+    assert.ok(tables[0].table.columns.every((column) => column.filterButton === true));
+  }
 });
 
 runTest("mergePayloads combines matrix chunks into one sorted root report", () => {

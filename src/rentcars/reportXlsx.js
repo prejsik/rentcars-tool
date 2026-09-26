@@ -370,13 +370,12 @@ function addDataSheet(workbook, name, title, subtitle, rows, preferredHeaders = 
     ref: "A4",
     headerRow: true,
     style: { theme: "TableStyleMedium2", showRowStripes: true },
-    columns: safeHeaders.map((header) => ({ name: humanizeHeader(header) })),
+    columns: safeHeaders.map((header) => ({ name: humanizeHeader(header), filterButton: true })),
     rows: rows.length
       ? rows.map((row) => safeHeaders.map((header) => row?.[header] === "" ? null : row?.[header] ?? null))
       : [safeHeaders.map((header, index) => index === 0 ? "No data" : null)]
   });
   styleDataSheet(sheet, safeHeaders, Math.max(1, rows.length));
-  sheet.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4 + Math.max(1, rows.length), column: safeHeaders.length } };
   return sheet;
 }
 
