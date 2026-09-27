@@ -61,10 +61,17 @@ jobs:
           scraper_status=$?
           set -e
 
-          if [[ -f output/rentcars-smoke.json ]]; then
-            node src/rentcars/reportHtml.js output/rentcars-smoke.json output/rentcars-smoke.html
-          fi
-          exit "$scraper_status"
+          echo "scraper_status=$scraper_status" >> "$GITHUB_OUTPUT"
+
+      - name: Validate smoke JSON
+        shell: bash
+        run: |
+          node src/rentcars/validateSmokeResult.js \
+            "${{ steps.scraper.outputs.scraper_status }}" \
+            output/rentcars-smoke.json
+
+      - name: Generate smoke report
+        run: node src/rentcars/reportHtml.js output/rentcars-smoke.json output/rentcars-smoke.html
 
       - name: Upload smoke results
         if: always()

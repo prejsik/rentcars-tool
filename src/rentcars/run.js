@@ -109,11 +109,17 @@ function normalizeTransmissionName(value) {
   return raw;
 }
 
+function optionalPrice(value) {
+  if (value == null || (typeof value === "string" && !value.trim())) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 function mapOffer(row, scenario) {
   const pickupLocation = row.pickupLocation || row.location;
   const totalPrice = Number(row.totalPrice);
-  const basePrice = Number.isFinite(Number(row.basePrice)) ? Number(row.basePrice) : null;
-  const insuredPrice = Number.isFinite(Number(row.protectedPrice)) ? Number(row.protectedPrice) : null;
+  const basePrice = optionalPrice(row.basePrice);
+  const insuredPrice = optionalPrice(row.protectedPrice);
   return {
     location: pickupLocation,
     requested_location: row.requestedLocation || row.location,

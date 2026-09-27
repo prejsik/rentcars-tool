@@ -33,6 +33,8 @@ const PICKUP_VALIDATION_ERROR_PATTERN = /punkt odbioru|pick-?up location/i;
 const LOAD_MORE_RESULTS_PATTERN = /zobacz\s+wi(?:e|\u0119)cej|poka(?:z|\u017c)\s+wi(?:e|\u0119)cej|wi(?:e|\u0119)cej\s+samochod|load more|show more|more cars/i;
 const AUTOMATIC_TRANSMISSION_PATTERN = /automatyczna|automatic|automat\b/i;
 const MANUAL_TRANSMISSION_PATTERN = /manualna|manual\b|r\u0119czna|reczna/i;
+const TRANSMISSION_FEATURE_CONTEXT_PATTERN = /skrzyn|\btransmission\b|\bgearbox\b|\bgear\s+box\b/i;
+const DAILY_RATE_PATTERN = /(?:\/\s*|\bper\s+|\bza\s+)(?:day|dzie(?:\u0144|n))(?![0-9A-Za-z_\u00c0-\u024f])/i;
 const RENTCARS_SORT_OPTIONS = new Map([
   ["suggested", { order: "suggested", label: "sugerowane", priceMode: "base" }],
   ["price", { order: "price", label: "po cenie", priceMode: "base" }],
@@ -1310,6 +1312,49 @@ class RentCarsScraper {
     }
   }
 
+  async captureResultPageSignature(page) {
+    return page.locator(".car-search-result-item")
+      .evaluateAll((elements) => elements.map((element) => {
+        const id = element.id
+          || element.getAttribute("data-id")
+          || element.getAttribute("data-car-id")
+          || element.getAttribute("data-offer-id")
+          || element.getAttribute("data-testid")
+          || "";
+        const text = String(element.textContent || "").replace(/\s+/g, " ").trim();
+        return id || text ? `${id}\u0000${text}` : "";
+      }).filter(Boolean))
+      .then((parts) => JSON.stringify(parts))
+      .catch(() => null);
+  }
+
+  async waitForAdditionalResultEvidence(
+    page,
+    collector,
+    previousOfferCount,
+    previousResultSignature,
+    timeoutMs
+  ) {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      if (collector.getOffers().length > previousOfferCount) {
+        return true;
+      }
+
+      const currentResultSignature = await this.captureResultPageSignature(page);
+      if (previousResultSignature != null && currentResultSignature && currentResultSignature !== "[]"
+        && currentResultSignature !== previousResultSignature) {
+        return true;
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(100, remainingMs)));
+    }
+  }
+
   async collectOffersFromCurrentPage(page, targetInput) {
     const target = makeLocationTarget(targetInput);
     const domOffers = this.filterOffersForConfiguredTransmission(
@@ -1338,7 +1383,8 @@ class RentCarsScraper {
         ...collector.getOffers(),
         ...accumulatedOffers
       ]);
-      if (hasMmCarsOffer(combinedOffers)) {
+      const mmCoverageFound = hasMmCarsOfferForConfiguredViews(combinedOffers, this.config.transmission);
+      if (mmCoverageFound && hasTopThreeCoverage(combinedOffers, this.config.transmission)) {
         return true;
       }
 
@@ -1348,6 +1394,8 @@ class RentCarsScraper {
       }
 
       const beforeUrl = page.url();
+      const previousCollectorOfferCount = collector.getOffers().length;
+      const previousResultSignature = await this.captureResultPageSignature(page);
       let loaded = false;
       const href = normalizeWhitespace(control.href);
 
@@ -1366,7 +1414,7 @@ class RentCarsScraper {
       if (!loaded && href) {
         const nextUrl = resolveUrl(href, beforeUrl);
         if (!nextUrl || seenUrls.has(nextUrl)) {
-          return false;
+          return mmCoverageFound;
         }
 
         seenUrls.add(nextUrl);
@@ -1377,19 +1425,31 @@ class RentCarsScraper {
       }
 
       if (!loaded) {
-        return false;
+        return mmCoverageFound;
       }
 
       await this.waitForResults(page);
-      await this.waitForCollectorOffers(collector, Math.min(this.collectorWaitTimeoutMs(), 5000));
+      const hasNewResultEvidence = await this.waitForAdditionalResultEvidence(
+        page,
+        collector,
+        previousCollectorOfferCount,
+        previousResultSignature,
+        Math.min(this.collectorWaitTimeoutMs(), 5000)
+      );
       accumulatedOffers.push(...await this.collectOffersFromCurrentPage(page, target));
+      if (!hasNewResultEvidence) {
+        return hasMmCarsOfferForConfiguredViews([
+          ...collector.getOffers(),
+          ...accumulatedOffers
+        ], this.config.transmission);
+      }
     }
 
     const combinedOffers = dedupeOffers([
       ...collector.getOffers(),
       ...accumulatedOffers
     ]);
-    if (hasMmCarsOffer(combinedOffers)) {
+    if (hasMmCarsOfferForConfiguredViews(combinedOffers, this.config.transmission)) {
       return true;
     }
     return !(await this.findLoadMoreControl(page));
@@ -1671,13 +1731,7 @@ class RentCarsScraper {
         candidate.vendor?.name,
         candidate.company?.name,
         candidate.rentalCompany?.name,
-        candidate.partner?.name,
-        candidate.carName,
-        candidate.vehicleName,
-        candidate.modelName,
-        candidate.car?.name,
-        candidate.vehicle?.name,
-        candidate.model?.name
+        candidate.partner?.name
       ])
     );
     const providerRating = firstRating([
@@ -1712,9 +1766,6 @@ class RentCarsScraper {
     const basePriceMoney = firstMoney([
       candidate.totalPrice,
       candidate.price,
-      candidate.price?.formatted,
-      candidate.price?.amount,
-      candidate.price?.total,
       candidate.prices?.total,
       candidate.prices?.default,
       candidate.pricing?.total,
@@ -1789,7 +1840,8 @@ class RentCarsScraper {
       candidate.car?.gearbox,
       candidate.vehicle?.transmission,
       candidate.vehicle?.gearbox,
-      candidate.model?.transmission,
+      candidate.model?.transmission
+    ]) || firstTransmissionFromFeatures([
       candidate.features,
       candidate.car?.features,
       candidate.vehicle?.features
@@ -1856,9 +1908,15 @@ class RentCarsScraper {
       };
 
       const findTransmissionText = (root) => {
-        const text = normalize(root?.innerText || root?.textContent || "");
-        const lines = text.split(/\n+/).map(normalize).filter(Boolean);
-        return lines.find((line) => /automatyczna|automatic|automat\b|manualna|manual\b|r(?:e|\u0119)czna/i.test(line)) || "";
+        const lines = String(root?.innerText || root?.textContent || "")
+          .split(/\r?\n+/)
+          .map(normalize)
+          .filter(Boolean);
+        const hasTransmissionValue = (line) => /automatyczna|automatic|automat\b|manualna|manual\b|r(?:e|\u0119)czna/i.test(line);
+        const hasTransmissionContext = (line) => /skrzyn|\btransmission\b|\bgearbox\b|\bgear\s+box\b/i.test(line);
+        return lines.find((line) => hasTransmissionContext(line) && hasTransmissionValue(line))
+          || lines.find((line) => /^(?:automatyczna|automatic|automat|manualna|manual|r(?:e|\u0119)czna)$/i.test(line))
+          || "";
       };
 
       const addCandidate = (providerText, priceText, ratingText = "", transmissionText = "") => {
@@ -2140,6 +2198,61 @@ function firstTransmission(values) {
   return "";
 }
 
+function firstTransmissionFromFeatures(values) {
+  for (const value of values) {
+    const features = Array.isArray(value) ? value : [value];
+    for (const feature of features) {
+      if (feature == null) {
+        continue;
+      }
+
+      if (typeof feature === "object") {
+        for (const [key, nestedValue] of Object.entries(feature)) {
+          if (!TRANSMISSION_FEATURE_CONTEXT_PATTERN.test(key)) {
+            continue;
+          }
+          const transmission = normalizeTransmission(nestedValue);
+          if (transmission) {
+            return transmission;
+          }
+        }
+
+        const label = firstDefinedString([
+          feature.name,
+          feature.label,
+          feature.title,
+          feature.type,
+          feature.key
+        ]);
+        if (TRANSMISSION_FEATURE_CONTEXT_PATTERN.test(label)) {
+          const transmission = firstTransmission([
+            feature.value,
+            feature.text,
+            feature.description,
+            label
+          ]);
+          if (transmission) {
+            return transmission;
+          }
+        }
+        continue;
+      }
+
+      const parts = String(feature).split(/[,;|]/);
+      for (const part of parts) {
+        if (!TRANSMISSION_FEATURE_CONTEXT_PATTERN.test(part)) {
+          continue;
+        }
+        const transmission = normalizeTransmission(part);
+        if (transmission) {
+          return transmission;
+        }
+      }
+    }
+  }
+  return "";
+}
+
 function filterOffersByTransmissionPreference(offers, rawPreference) {
   const preference = normalizeTransmissionPreference(rawPreference);
   if (preference === "any") {
@@ -2233,33 +2346,43 @@ function firstMoney(values) {
     if (typeof value === "number" && Number.isFinite(value)) {
       parsed = parseMoney(value);
     } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      const fallbackCurrency = normalizeCurrency(firstDefinedString([value.currency, value.curr]));
+      const semanticTotal = parseMoney(value.total, fallbackCurrency);
+      if (semanticTotal) {
+        return semanticTotal;
+      }
+
       const formattedCandidate = firstDefinedString([
         value.formatted,
         value.display,
         value.price
       ]);
-      if (formattedCandidate) {
-        parsed = parseMoney(formattedCandidate, normalizeCurrency(firstDefinedString([value.currency, value.curr])));
+      if (formattedCandidate && !DAILY_RATE_PATTERN.test(formattedCandidate)) {
+        parsed = parseMoney(formattedCandidate, fallbackCurrency);
       }
       if (parsed) {
         return parsed;
       }
+      if (formattedCandidate && DAILY_RATE_PATTERN.test(formattedCandidate)) {
+        continue;
+      }
 
-      const numericCandidate = [value.raw, value.amount, value.total, value.value]
+      const numericCandidate = [value.raw, value.amount, value.value]
         .find((item) => typeof item === "number" && Number.isFinite(item));
 
       if (numericCandidate != null) {
-        parsed = parseMoney(numericCandidate, normalizeCurrency(firstDefinedString([value.currency, value.curr])));
+        parsed = parseMoney(numericCandidate, fallbackCurrency);
       } else {
         parsed = parseMoney(firstDefinedString([
           value.amount,
-          value.total,
           value.value,
           value.formatted,
           value.display,
           value.price
         ]));
       }
+    } else if (typeof value === "string" && DAILY_RATE_PATTERN.test(value)) {
+      continue;
     } else {
       parsed = parseMoney(value);
     }
@@ -2378,6 +2501,35 @@ function countUniqueOfferProviders(offers) {
 function hasMmCarsOffer(offers) {
   return offers.some((offer) => (
     normalizeRentCarsProviderName(offer?.provider).toLowerCase() === "mm cars rental"
+  ));
+}
+
+function hasMmCarsOfferForConfiguredViews(offers, rawPreference) {
+  const preference = normalizeTransmissionPreference(rawPreference);
+  if (preference === "any") {
+    return hasMmCarsOffer(
+      offers.filter((offer) => normalizeTransmission(offer?.transmission) === "automatic")
+    );
+  }
+
+  return hasMmCarsOffer(
+    offers.filter((offer) => normalizeTransmission(offer?.transmission) === preference)
+  );
+}
+
+function hasTopThreeCoverage(offers, rawPreference) {
+  const preference = normalizeTransmissionPreference(rawPreference);
+  const hasTopThree = (viewOffers) => countUniqueOfferProviders(viewOffers) >= 3;
+
+  if (preference === "any") {
+    const automaticOffers = offers.filter(
+      (offer) => normalizeTransmission(offer?.transmission) === "automatic"
+    );
+    return hasTopThree(offers) && hasTopThree(automaticOffers);
+  }
+
+  return hasTopThree(offers.filter(
+    (offer) => normalizeTransmission(offer?.transmission) === preference
   ));
 }
 

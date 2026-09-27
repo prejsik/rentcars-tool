@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { dailyPrice } = require("./utils");
+const { dailyPrice, isTargetIncomplete } = require("./utils");
 
 const MM_CLOSE_PRICE_PER_DAY_THRESHOLD_PLN = 10;
 const MM_TOP1_RUNNER_UP_PRICE_PER_DAY_THRESHOLD_PLN = 10;
@@ -193,10 +193,10 @@ function rankedOffersForView(scenarioPayload, location, sortOrder, legacyTop3, m
   return rankOffersByProvider(viewOffers);
 }
 
-function getMmState(rankedOffers) {
+function getMmState(rankedOffers, incomplete = false) {
   const mmOffer = rankedOffers.find((offer) => isMmCarsProvider(offer?.provider_name));
   if (!mmOffer) {
-    return "missing";
+    return incomplete || !rankedOffers.length ? "unknown" : "missing";
   }
   const top1GapState = getMmTop1GapState(mmOffer, rankedOffers);
   if (top1GapState) {
@@ -213,9 +213,10 @@ function isTop1High(rankedOffers) {
   return Number.isFinite(pricePerDay) && pricePerDay > TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN;
 }
 
-function mmRankLabel(rankedOffers) {
+function mmRankLabel(rankedOffers, incomplete = false) {
   const rank = rankedOffers.findIndex((offer) => isMmCarsProvider(offer?.provider_name));
-  return rank >= 0 ? `Top ${rank + 1}` : "Brak MM";
+  return rank >= 0 ? `Top ${rank + 1}`
+    : getMmState(rankedOffers, incomplete) === "unknown" ? "Niepe\u0142ne dane" : "Brak MM";
 }
 
 function cheaperOffersLabel(rankedOffers) {
@@ -327,7 +328,8 @@ function buildScenarioRows(rootPayload, scenarioPayload) {
       const rowClass = index % 2 === 0 ? "even" : "odd";
       const allHigh = isTop1High(allRanked);
       const automaticHigh = isTop1High(automaticRanked);
-      return `<tr class="${rowClass}" data-location="${escapeHtml(row.location)}" data-location-type="${isAirportLocation(row.location) ? "airport" : "branch"}" data-mm-state-automatic="${getMmState(automaticRanked)}" data-mm-state-all="${getMmState(allRanked)}" data-top1-high-automatic="${automaticHigh}" data-top1-high-all="${allHigh}">
+      const incomplete = isTargetIncomplete(scenarioPayload, row.location, row.sortOrder);
+      return `<tr class="${rowClass}" data-location="${escapeHtml(row.location)}" data-location-type="${isAirportLocation(row.location) ? "airport" : "branch"}" data-mm-state-automatic="${getMmState(automaticRanked, incomplete)}" data-mm-state-all="${getMmState(allRanked, incomplete)}" data-top1-high-automatic="${automaticHigh}" data-top1-high-all="${allHigh}">
         <td class="index">${index}</td>
         <td class="location">${escapeHtml(row.location)}</td>
         ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[0])), escapeHtml(formatProviderName(allTop3[0])), mmClassName(automaticTop3[0], automaticTop3), mmClassName(allTop3[0], allTop3))}
@@ -337,7 +339,7 @@ function buildScenarioRows(rootPayload, scenarioPayload) {
         ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[2])), escapeHtml(formatProviderName(allTop3[2])), mmClassName(automaticTop3[2], automaticTop3), mmClassName(allTop3[2], allTop3))}
         ${buildDualCell(escapeHtml(formatOfferPrice(automaticTop3[2])), escapeHtml(formatOfferPrice(allTop3[2])))}
         ${buildDualCell(escapeHtml(formatOfferPrice(automaticMm)), escapeHtml(formatOfferPrice(allMm)), automaticMm ? mmClassName(automaticMm, automaticRanked) : "muted", allMm ? mmClassName(allMm, allRanked) : "muted")}
-        ${buildDualCell(escapeHtml(mmRankLabel(automaticRanked)), escapeHtml(mmRankLabel(allRanked)), "rank-cell", "rank-cell")}
+        ${buildDualCell(escapeHtml(mmRankLabel(automaticRanked, incomplete)), escapeHtml(mmRankLabel(allRanked, incomplete)), "rank-cell", "rank-cell")}
         ${buildDualCell(escapeHtml(cheaperOffersLabel(automaticRanked)), escapeHtml(cheaperOffersLabel(allRanked)), "count-cell", "count-cell")}
       </tr>`;
     })
@@ -389,13 +391,18 @@ function buildScenarioTable(rootPayload, scenarioPayload, index, total) {
   </section>`;
 }
 
-function primaryRankingForLocation(scenarioPayload, location, mode) {
+function primarySortOrderForLocation(scenarioPayload, location) {
   const locationData = scenarioPayload?.top_3_by_location?.[location] || {};
   const configuredSortOrder = scenarioPayload?.sort_orders?.[0];
-  const sortOrder = configuredSortOrder?.order
+  return configuredSortOrder?.order
     || configuredSortOrder
     || (Array.isArray(locationData) ? "price" : Object.keys(locationData)[0])
     || "price_insurance";
+}
+
+function primaryRankingForLocation(scenarioPayload, location, mode) {
+  const locationData = scenarioPayload?.top_3_by_location?.[location] || {};
+  const sortOrder = primarySortOrderForLocation(scenarioPayload, location);
   const legacyTop3 = Array.isArray(locationData)
     ? locationData
     : Array.isArray(locationData[sortOrder]) ? locationData[sortOrder] : [];
@@ -422,9 +429,11 @@ function buildHtmlReport(payload) {
     (sum, scenario) => sum + scenarioLocations(payload, scenario).length,
     0
   );
-  const missingMm = scenarios.reduce((sum, scenario) => sum + scenarioLocations(payload, scenario)
-    .filter((location) => !primaryRankingForLocation(scenario, location, "all")
-      .some((offer) => isMmCarsProvider(offer?.provider_name))).length, 0);
+  const mmStates = scenarios.flatMap((scenario) => scenarioLocations(payload, scenario)
+    .map((location) => getMmState(primaryRankingForLocation(scenario, location, "all"),
+      isTargetIncomplete(scenario, location, primarySortOrderForLocation(scenario, location)))));
+  const missingMm = mmStates.filter((state) => state === "missing").length;
+  const unknownMm = mmStates.filter((state) => state === "unknown").length;
   const errorCount = scenarios.reduce(
     (sum, scenario) => sum + (Array.isArray(scenario.errors) ? scenario.errors.length : 0),
     0
@@ -435,6 +444,7 @@ function buildHtmlReport(payload) {
   const durationOptions = durations.map((duration) => ({ value: String(duration), label: `${duration} dni` }));
   const mmStateOptions = [
     { value: "missing", label: "Brak MM" },
+    { value: "unknown", label: "Niepe\u0142ne dane MM" },
     { value: "top1-gap", label: "Top1: różnica 10–19,99 PLN/d" },
     { value: "top1-gap-20", label: "Top1: różnica 20–29,99 PLN/d" },
     { value: "top1-gap-30", label: "Top1: różnica min. 30 PLN/d" },
@@ -696,6 +706,8 @@ function buildHtmlReport(payload) {
     body[data-offer-view="automatic"] .offer-view-all { display: none; }
     body[data-offer-view="automatic"] .offer-view-automatic { display: block; }
     .rank-cell, .count-cell { color: var(--text); }
+    .rank-cell { white-space: normal; }
+    .scenario[hidden], tbody tr[hidden] { display: none; }
 
     .top1-high {
       background: #7a1d1d;
@@ -775,7 +787,7 @@ function buildHtmlReport(payload) {
   <h1>RentCars.pl report</h1>
   <div class="meta">Generated at: ${escapeHtml(generatedAt)} | Time zone: ${escapeHtml(payload.time_zone || "Europe/Warsaw")} | Source: ${escapeHtml(payload.source_url || "https://rentcars.pl")}</div>
   ${statusNotice}
-  <div class="summary">Scenariusze: ${scenarios.length} | sprawdzenia lokalizacji: ${locationChecks} | brak MM Cars Rental: ${missingMm} | błędy: ${errorCount} | Top1 &gt; ${TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN} PLN/d: ${highTop1Count}</div>
+  <div class="summary">Scenariusze: ${scenarios.length} | sprawdzenia lokalizacji: ${locationChecks} | brak MM Cars Rental: ${missingMm} | niepotwierdzona obecno\u015b\u0107 MM: ${unknownMm} | błędy: ${errorCount} | Top1 &gt; ${TOP1_HIGH_PRICE_PER_DAY_THRESHOLD_PLN} PLN/d: ${highTop1Count}</div>
   <div class="legend">
     <span><span class="badge mm">MM Cars Rental</span> MM Cars Rental in table</span>
     <span><span class="badge mm mm-close">MM close</span> MM Cars Rental max 10 PLN/day more expensive than a higher-ranked competitor</span>

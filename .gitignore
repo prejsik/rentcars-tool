@@ -5,6 +5,7 @@ artifacts/
 release/
 backups/
 .npm-cache/
+.playwright-cli/
 .env
 *.log
 *.tmp

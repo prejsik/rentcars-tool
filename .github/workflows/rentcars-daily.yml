@@ -212,37 +212,6 @@ jobs:
           echo "Expected airport checks: $expected_check_count"
           echo "Dates per chunk: $chunk_size"
 
-  notify-plan-failure:
-    name: Notify Telegram if planning fails
-    needs: plan
-    if: always() && needs.plan.result == 'failure'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - name: Notify Telegram about startup failure
-        shell: bash
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-            echo "::error::Telegram secrets are missing."
-            exit 1
-          fi
-
-          printf -v message 'RentCars.pl: run failed before scraping could start.\n\nGitHub Actions run:\n%s\n\nThe watchdog check will run around 06:30 Europe/Warsaw.' "$RUN_URL"
-          curl --fail --show-error --silent \
-            --retry 3 \
-            --retry-delay 3 \
-            --retry-all-errors \
-            --request POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=${message}" \
-            --data-urlencode "disable_web_page_preview=true"
-
   scrape:
     name: Scrape chunk ${{ matrix.chunk_id }}
     needs: plan
@@ -338,19 +307,15 @@ jobs:
         run: exit 1
 
   merge:
-    name: Merge and publish RentCars.pl report
+    name: Merge RentCars.pl report
     needs:
       - plan
       - scrape
     if: always() && needs.plan.result == 'success' && needs.plan.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    concurrency:
-      group: rentcars-pages-publication
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.pages-deployment.outputs.page_url }}
+    outputs:
+      artifact_url: ${{ steps.upload.outputs['artifact-url'] }}
 
     steps:
       - name: Checkout repository
@@ -430,9 +395,65 @@ jobs:
           '
           echo "metadata_exists=true" >> "$GITHUB_OUTPUT"
 
+      - name: Prepare notification body
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_START_DATES: ${{ needs.plan.outputs.start_dates }}
+          EXPECTED_DURATIONS: ${{ needs.plan.outputs.durations }}
+        run: |
+          node src/rentcars/dailyNotification.js \
+            output/rentcars-results-latest.json \
+            "$EXPECTED_START_DATES" \
+            "$EXPECTED_DURATIONS" \
+            > output/rentcars-notification-body.txt
+          test -s output/rentcars-notification-body.txt
+
+      - name: Upload merged RentCars.pl results
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rentcars-results-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+          path: |
+            output/rentcars-results-latest.json
+            output/rentcars-report.html
+            output/rentcars-report-meta.json
+            output/rentcars-summary.xlsx
+            output/rentcars-notification-body.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  publish:
+    name: Publish RentCars.pl report
+    needs: merge
+    if: always() && needs.merge.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: rentcars-pages-publication
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.pages-deployment.outputs.page_url }}
+    outputs:
+      published: ${{ steps.pages-deployment.outcome == 'success' && 'true' || 'false' }}
+      page_url: ${{ steps.pages-deployment.outcome == 'success' && steps.pages-deployment.outputs.page_url || '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download merged RentCars.pl results
+        id: download
+        uses: actions/download-artifact@v4
+        with:
+          name: rentcars-results-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+          path: output
+
       - name: Check report freshness
         id: freshness
-        if: always() && steps.metadata.outputs.metadata_exists == 'true'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -540,7 +561,7 @@ jobs:
 
       - name: Ensure GitHub Pages is enabled
         id: pages-status
-        if: always() && steps.report.outputs.report_exists == 'true' && steps.freshness.outputs.publish == 'true'
+        if: steps.freshness.outputs.publish == 'true'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -576,7 +597,7 @@ jobs:
           fi
 
       - name: Prepare GitHub Pages site
-        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true' && steps.freshness.outputs.publish == 'true'
+        if: steps.pages-status.outputs.enabled == 'true'
         shell: bash
         run: |
           mkdir -p pages
@@ -585,93 +606,131 @@ jobs:
           cp output/rentcars-report-meta.json pages/report-meta.json
 
       - name: Configure GitHub Pages
-        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true' && steps.freshness.outputs.publish == 'true'
+        if: steps.pages-status.outputs.enabled == 'true'
         uses: actions/configure-pages@v5
-        continue-on-error: true
 
       - name: Upload GitHub Pages artifact
-        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true' && steps.freshness.outputs.publish == 'true'
+        if: steps.pages-status.outputs.enabled == 'true'
         uses: actions/upload-pages-artifact@v3
-        continue-on-error: true
         with:
           name: github-pages-attempt-${{ github.run_attempt }}
           path: pages
 
       - name: Deploy GitHub Pages
         id: pages-deployment
-        if: always() && steps.report.outputs.report_exists == 'true' && steps.pages-status.outputs.enabled == 'true' && steps.freshness.outputs.publish == 'true'
+        if: steps.pages-status.outputs.enabled == 'true'
         uses: actions/deploy-pages@v4
-        continue-on-error: true
         with:
           artifact_name: github-pages-attempt-${{ github.run_attempt }}
 
-      - name: Upload merged RentCars.pl results
-        id: upload
-        if: always()
-        uses: actions/upload-artifact@v4
+  notify:
+    name: Notify Telegram about RentCars.pl run
+    needs:
+      - plan
+      - scrape
+      - merge
+    if: always() && (needs.plan.result != 'success' || needs.plan.outputs.should_run == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pages: read
+
+    steps:
+      - name: Download notification details
+        uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: rentcars-results-${{ github.run_number }}-attempt-${{ github.run_attempt }}
-          path: |
-            output/rentcars-results-latest.json
-            output/rentcars-report.html
-            output/rentcars-report-meta.json
-            output/rentcars-summary.xlsx
-          if-no-files-found: warn
-          retention-days: 30
+          path: notification-input
 
-      - name: Notify Telegram
-        if: always()
+      - name: Send Telegram notification
         shell: bash
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PAGE_URL: ${{ steps.pages-deployment.outcome == 'success' && steps.pages-deployment.outputs.page_url || '' }}
-          ARTIFACT_URL: ${{ steps.upload.outputs['artifact-url'] }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_URL: ${{ needs.merge.outputs.artifact_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EXPECTED_START_DATES: ${{ needs.plan.outputs.start_dates }}
-          EXPECTED_DURATIONS: ${{ needs.plan.outputs.durations }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          SCRAPE_RESULT: ${{ needs.scrape.result }}
+          MERGE_RESULT: ${{ needs.merge.result }}
         run: |
           if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
             echo "::error::Telegram secrets are missing."
             exit 1
           fi
 
-          if [[ -f output/rentcars-results-latest.json ]]; then
-            progress=$(node -e '
-              const fs = require("fs");
-              const data = JSON.parse(fs.readFileSync("output/rentcars-results-latest.json", "utf8"));
-              const status = data.run_status || (data.is_partial ? "partial" : "complete");
-              const scenarios = `${data.completed_scenario_count || 0}/${data.expected_scenario_count || 0} scenarios`;
-              const checks = `${data.successful_check_count || 0} successful, ${data.failed_check_count || 0} failed, ${data.missing_check_count || 0} missing / ${data.expected_check_count || 0} checks`;
-              process.stdout.write(`${status}; ${scenarios}; ${checks}; generated ${data.generated_at || "unknown"}`);
-            ')
-            if ! mm_alert=$(node src/rentcars/telegramSummary.js \
-              output/rentcars-results-latest.json \
-              "$EXPECTED_START_DATES" \
-              "$EXPECTED_DURATIONS"); then
-              echo "::warning::Could not calculate the MM Cars Rental availability alert."
-              mm_alert=$'ALERT MM Cars Rental\nNie udało się sprawdzić obecności MM w raporcie.'
-            fi
+          if [[ -s notification-input/rentcars-notification-body.txt ]]; then
+            message=$(<notification-input/rentcars-notification-body.txt)
           else
-            progress="report generation failed; no merged JSON"
-            mm_alert=$(node -e '
-              const { buildMmAvailabilityAlert } = require("./src/rentcars/telegramSummary");
-              process.stdout.write(buildMmAvailabilityAlert({ scenarios: [] }, {
-                expectedStartDates: process.env.EXPECTED_START_DATES,
-                expectedDurations: process.env.EXPECTED_DURATIONS
-              }));
-            ')
+            printf -v message 'RentCars.pl: run finished (details unavailable; plan=%s, scrape=%s, merge=%s).' \
+              "$PLAN_RESULT" "$SCRAPE_RESULT" "$MERGE_RESULT"
           fi
 
-          printf -v message 'RentCars.pl: run finished (%s).\n\n' "$progress"
-          if [[ -n "$mm_alert" ]]; then
-            printf -v section '%s\n\n' "$mm_alert"
-            message+="$section"
+          pages_info_path="${RUNNER_TEMP}/rentcars-pages-info.json"
+          metadata_path="${RUNNER_TEMP}/rentcars-report-meta.json"
+          html_path="${RUNNER_TEMP}/rentcars-current-report.html"
+          pages_url=""
+          page_url=""
+          if pages_status=$(curl --silent --show-error --max-time 10 \
+            --output "$pages_info_path" \
+            --write-out "%{http_code}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/pages"); then
+            if [[ "$pages_status" == "200" ]]; then
+              if pages_url=$(PAGES_INFO_PATH="$pages_info_path" node -e '
+                const fs = require("fs");
+                const payload = JSON.parse(fs.readFileSync(process.env.PAGES_INFO_PATH, "utf8"));
+                const url = new URL(String(payload.html_url || ""));
+                if (url.protocol !== "https:") process.exit(1);
+                process.stdout.write(url.toString().replace(/\/$/, ""));
+              '); then
+                pages_url="${pages_url%/}/"
+              fi
+            fi
           fi
-          if [[ -n "$PAGE_URL" ]]; then
-            printf -v section 'Current HTML report:\n%sreport.html\n\n' "${PAGE_URL%/}/"
+
+          if [[ -n "$pages_url" ]]; then
+            for attempt in {1..8}; do
+              rm -f "$metadata_path"
+              if metadata_status=$(curl --silent --show-error --max-time 5 \
+                --output "$metadata_path" \
+                --write-out "%{http_code}" \
+                "${pages_url}report-meta.json?run=${GITHUB_RUN_ID}&run_attempt=${GITHUB_RUN_ATTEMPT}&check=${attempt}"); then
+                if [[ "$metadata_status" == "200" ]] \
+                  && META_PATH="$metadata_path" EXPECTED_RUN_ID="$GITHUB_RUN_ID" EXPECTED_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" node -e '
+                    const fs = require("fs");
+                    const metadata = JSON.parse(fs.readFileSync(process.env.META_PATH, "utf8"));
+                    const matchesRun = String(metadata.run_id || "") === process.env.EXPECTED_RUN_ID;
+                    const matchesAttempt = Number(metadata.run_attempt) === Number(process.env.EXPECTED_RUN_ATTEMPT);
+                    process.exit(matchesRun && matchesAttempt ? 0 : 1);
+                  '; then
+                  if html_status=$(curl --silent --show-error --max-time 5 \
+                    --output "$html_path" \
+                    --write-out "%{http_code}" \
+                    "${pages_url}report.html?run=${GITHUB_RUN_ID}&run_attempt=${GITHUB_RUN_ATTEMPT}&check=${attempt}"); then
+                    if [[ "$html_status" == "200" ]] \
+                      && grep --fixed-strings --quiet '<meta name="rentcars-report-metadata-version" content="1">' "$html_path"; then
+                      page_url="$pages_url"
+                      break
+                    fi
+                  fi
+                fi
+              fi
+              if [[ "$attempt" -lt 8 ]]; then
+                sleep 10
+              fi
+            done
+          fi
+
+          if [[ -n "$page_url" ]]; then
+            printf -v section '\n\nCurrent HTML report:\n%sreport.html\n\n' "$page_url"
           else
-            printf -v section 'GitHub Pages deployment was not confirmed for this run.\n\n'
+            printf -v section '\n\nGitHub Pages deployment was not confirmed for this run.\n\n'
           fi
           message+="$section"
           if [[ -n "$ARTIFACT_URL" ]]; then
@@ -682,6 +741,7 @@ jobs:
           message+="$section"
 
           curl --fail --show-error --silent \
+            --max-time 15 \
             --retry 3 \
             --retry-delay 3 \
             --retry-all-errors \

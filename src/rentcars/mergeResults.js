@@ -224,8 +224,8 @@ function mergeScenarioAttempts(left, right) {
       if (!key) {
         continue;
       }
-      const existing = expectedTargets.get(key);
-      if (!existing || target.mm_coverage_complete === true) {
+      const successfulAttemptIndex = latestSuccessfulAttemptByTarget.get(key);
+      if (successfulAttemptIndex === attemptIndex || successfulAttemptIndex === undefined) {
         expectedTargets.set(key, target);
       }
       if (!attemptErrors.has(key)) {

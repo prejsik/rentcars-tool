@@ -399,10 +399,11 @@ runAsyncTest("pagination continues past three providers until MM is found", asyn
     timeoutMs: 1000
   });
   let loadMoreChecks = 0;
+  let pageNumber = 1;
   scraper.findLoadMoreControl = async () => {
     loadMoreChecks += 1;
     return loadMoreChecks === 1
-      ? { locator: { click: async () => true }, href: "" }
+      ? { locator: { click: async () => { pageNumber += 1; } }, href: "" }
       : null;
   };
   scraper.waitForResults = async () => {};
@@ -421,7 +422,10 @@ runAsyncTest("pagination continues past three providers until MM is found", asyn
     transmission: "automatic"
   }));
   const complete = await scraper.loadAdditionalResultPages(
-    { url: () => "https://rentcars.pl/search/test", waitForLoadState: async () => {} },
+    {
+      url: () => "https://rentcars.pl/search/test", waitForLoadState: async () => {},
+      locator: () => ({ evaluateAll: async () => [String(pageNumber)] })
+    },
     { location: "Warszawa", sortOrder: "price_insurance", priceMode: "insurance" },
     { getOffers: () => [] },
     accumulatedOffers
@@ -440,7 +444,8 @@ runAsyncTest("pagination reports incomplete MM coverage when more results remain
     timeoutMs: 1000
   });
   let loadMoreChecks = 0;
-  const loadMoreControl = { locator: { click: async () => true }, href: "" };
+  let pageNumber = 1;
+  const loadMoreControl = { locator: { click: async () => { pageNumber += 1; } }, href: "" };
   scraper.findLoadMoreControl = async () => {
     loadMoreChecks += 1;
     return loadMoreControl;
@@ -455,7 +460,10 @@ runAsyncTest("pagination reports incomplete MM coverage when more results remain
   }];
 
   const complete = await scraper.loadAdditionalResultPages(
-    { url: () => "https://rentcars.pl/search/test", waitForLoadState: async () => {} },
+    {
+      url: () => "https://rentcars.pl/search/test", waitForLoadState: async () => {},
+      locator: () => ({ evaluateAll: async () => [String(pageNumber)] })
+    },
     { location: "Warszawa", sortOrder: "price_insurance", priceMode: "insurance" },
     { getOffers: () => [] },
     ["A", "B", "C"].map((provider, index) => ({
@@ -836,8 +844,9 @@ runTest("push smoke cannot deploy Pages or notify Telegram", () => {
 runTest("daily Telegram message preserves blank lines between links", () => {
   const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
 
-  assert.match(daily, /printf -v message 'RentCars\.pl: run finished/);
-  assert.match(daily, /printf -v section 'Current HTML report:\\n%sreport\.html\\n\\n'/);
+  const formatter = fs.readFileSync("src/rentcars/dailyNotification.js", "utf8");
+  assert.match(formatter, /RentCars\.pl: run finished/);
+  assert.match(daily, /printf -v section '\\n\\nCurrent HTML report:\\n%sreport\.html\\n\\n'/);
   assert.match(daily, /printf -v section 'Artifact backup:\\n%s\\n\\n'/);
   assert.doesNotMatch(daily, /message\+=\$\(printf/);
 });
@@ -975,10 +984,9 @@ runTest("daily workflow leaves delayed recovery to the watchdog", () => {
   assert.ok(gateIndex >= 0 && checkoutIndex > gateIndex);
   assert.match(daily, /if: steps\.gate\.outputs\.should_run == 'true'/);
   assert.doesNotMatch(daily, /retry_run_id|status=completed/);
-  assert.match(daily, /^  notify-plan-failure:$/m);
-  assert.match(daily, /if: always\(\) && needs\.plan\.result == 'failure'/);
-  assert.match(daily, /RentCars\.pl: run failed before scraping could start/);
-  assert.match(daily, /watchdog check will run around 06:30 Europe\/Warsaw/);
+  assert.match(daily, /^  notify:$/m);
+  assert.match(daily, /if: always\(\) && \(needs\.plan\.result != 'success'/);
+  assert.match(daily, /details unavailable; plan=%s, scrape=%s, merge=%s/);
   assert.match(daily, /if: always\(\) && needs\.plan\.result == 'success' && needs\.plan\.outputs\.should_run == 'true'/);
 });
 
@@ -998,7 +1006,7 @@ runTest("daily workflow marks incomplete chunks and guards Pages publication", (
   assert.match(daily, /cancel-in-progress: false/);
   assert.match(daily, /Check report freshness/);
   assert.match(daily, /report-meta\.json/);
-  assert.match(daily, /buildMmAvailabilityAlert\(\{ scenarios: \[\] \}/);
+  assert.match(daily, /dailyNotification\.js/);
   assert.match(freshnessStep, /echo "publish=false"/);
   assert.match(freshnessStep, /current_http_status/);
   assert.match(freshnessStep, /"\$current_http_status" == "404"/);
@@ -1147,7 +1155,7 @@ runAsyncTest("watchdog enriches daily runs with scrape job evidence", async () =
   assert.equal(enriched[0].has_scrape_jobs, true);
 });
 
-runAsyncTest("watchdog keeps evaluating runs when one jobs API request fails", async () => {
+runAsyncTest("watchdog inspects all runs but blocks recovery when newer job evidence is unavailable", async () => {
   const { classifyDailyRuns, enrichRunJobEvidence } = require("../src/rentcars/watchdog");
   const enriched = await enrichRunJobEvidence([
     {
@@ -1181,7 +1189,7 @@ runAsyncTest("watchdog keeps evaluating runs when one jobs API request fails", a
   assert.equal(enriched[1].has_scrape_jobs, true);
   assert.deepEqual(
     classifyDailyRuns(enriched, { now: "2026-08-21T04:30:00.000Z" }),
-    { action: "rerun", runId: 602, runAttempt: 1 }
+    { action: "inspection_failed", runId: 601, runAttempt: 1 }
   );
 });
 

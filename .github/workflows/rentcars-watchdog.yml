@@ -6,7 +6,14 @@ on:
     - cron: "30 5 * * *"
     - cron: "30 6 * * *"
     - cron: "30 7 * * *"
+  workflow_run:
+    workflows: ["RentCars daily run"]
+    types: [completed]
   workflow_dispatch:
+
+concurrency:
+  group: rentcars-watchdog-recovery
+  cancel-in-progress: false
 
 permissions:
   actions: write
@@ -22,8 +29,37 @@ jobs:
       - name: Check Warsaw watchdog gate
         id: gate
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_STATUS: ${{ github.event.workflow_run.status }}
+          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SOURCE_TITLE: ${{ github.event.workflow_run.display_title }}
         run: |
-          if [[ "${{ github.event_name }}" != "schedule" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            trusted_event=false
+            if [[ "$SOURCE_EVENT" == "schedule" ]]; then
+              trusted_event=true
+            elif [[ "$SOURCE_EVENT" == "workflow_dispatch" && "$SOURCE_TITLE" == "RentCars watchdog recovery" ]]; then
+              trusted_event=true
+            fi
+
+            if [[ "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" \
+              && "$SOURCE_BRANCH" == "$DEFAULT_BRANCH" \
+              && "$SOURCE_STATUS" == "completed" \
+              && "$SOURCE_CONCLUSION" != "success" \
+              && "$trusted_event" == "true" ]]; then
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          if [[ "$EVENT_NAME" != "schedule" ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -45,6 +81,9 @@ jobs:
       - name: Checkout repository
         if: steps.gate.outputs.should_run == 'true'
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - name: Setup Node.js
         if: steps.gate.outputs.should_run == 'true'
@@ -58,8 +97,21 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WATCHDOG_MODE: ${{ github.event_name }}
+          WATCHDOG_REPOSITORY: ${{ github.repository }}
+          WATCHDOG_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WATCHDOG_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          WATCHDOG_TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          WATCHDOG_TRIGGER_STATUS: ${{ github.event.workflow_run.status }}
+          WATCHDOG_TRIGGER_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WATCHDOG_TRIGGER_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          WATCHDOG_TRIGGER_CREATED_AT: ${{ github.event.workflow_run.created_at }}
+          WATCHDOG_TRIGGER_TITLE: ${{ github.event.workflow_run.display_title }}
+          WATCHDOG_TRIGGER_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WATCHDOG_TRIGGER_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
         run: |
-          runs_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/workflows/rentcars-daily.yml/runs?per_page=20"
+          runs_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/workflows/rentcars-daily.yml/runs?branch=${DEFAULT_BRANCH}&per_page=20"
           runs_json=$(curl --fail --silent --show-error \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer ${GITHUB_TOKEN}" \
@@ -125,6 +177,10 @@ jobs:
               ;;
             inspection_failed)
               message="RentCars.pl watchdog: GitHub did not provide enough job data to verify run ${TARGET_RUN_ID}. No duplicate run was started; manual inspection is required."
+              api_failed=true
+              ;;
+            reporting_failed)
+              message="RentCars.pl watchdog: collection and merge completed for run ${TARGET_RUN_ID}, but publishing or notification failed. No collection rerun was started; inspect the failed reporting job."
               api_failed=true
               ;;
             exhausted)

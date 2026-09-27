@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const ExcelJS = require("exceljs");
+const { isTargetIncomplete } = require("./utils");
 
 const MM_PROVIDER = "mm cars rental";
 const NEAR_NEXT_THRESHOLD_PLN = 10;
@@ -28,6 +29,9 @@ function isMmProvider(value) {
 }
 
 function finiteNumber(value) {
+  if (value == null || (typeof value === "string" && !value.trim())) {
+    return null;
+  }
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
 }
@@ -102,12 +106,7 @@ function rankedOffersForTarget(scenario, location, sortOrder) {
     }
   }
 
-  return [...byProvider.values()].sort((left, right) => {
-    if (left.daily_price !== right.daily_price) {
-      return left.daily_price - right.daily_price;
-    }
-    return left.provider_name.localeCompare(right.provider_name);
-  });
+  return [...byProvider.values()].sort((left, right) => left.daily_price - right.daily_price);
 }
 
 function buildDetailRows(payload) {
@@ -130,14 +129,16 @@ function buildDetailRows(payload) {
         const gapToTop1 = mmIndex > 0 ? mmOffer.daily_price - top1.daily_price : null;
         const gapToNext = mmIndex > 0 ? mmOffer.daily_price - higherOffer.daily_price : null;
         const roomIfTop1 = mmIndex === 0 && top2 ? top2.daily_price - mmOffer.daily_price : null;
+        const mmStatus = mmOffer ? "present"
+          : !offers.length || isTargetIncomplete(scenario, location, sortOrder) ? "unknown" : "missing";
 
         rows.push({
           start_date: dateCell(scenario.start_date || scenario.start_day_label || scenario.pickup_date),
           rental_days: Number(scenario.rental_days) || null,
           location,
           sort_order: sortOrder,
-          check_status: error ? "error" : offers.length ? "ok" : "no_verified_offers",
-          error: error?.error || "",
+          check_status: error ? "error" : !offers.length ? "no_verified_offers" : mmStatus === "unknown" ? "incomplete" : "ok",
+          error: error?.error || (mmStatus === "unknown" && offers.length ? "Incomplete MM search; absence cannot be confirmed" : ""),
           attempt_count: Number(error?.attempt_count) || null,
           top1_provider: top1?.provider_name || "",
           top1_daily: round(top1?.daily_price),
@@ -146,6 +147,7 @@ function buildDetailRows(payload) {
           top3_provider: top3?.provider_name || "",
           top3_daily: round(top3?.daily_price),
           mm_rank: mmRank,
+          mm_status: mmStatus,
           mm_daily: round(mmOffer?.daily_price),
           gap_to_top1_daily: round(gapToTop1),
           gap_to_next_daily: round(gapToNext),
@@ -171,7 +173,7 @@ function aggregateRows(rows, groupKey) {
   }
 
   return [...groups.entries()].map(([key, groupRows]) => {
-    const validRows = groupRows.filter((row) => row.top1_provider);
+    const validRows = groupRows.filter((row) => row.check_status === "ok" && row.top1_provider);
     const mmTop1 = validRows.filter((row) => row.mm_rank === 1).length;
     const mmTop2 = validRows.filter((row) => row.mm_rank === 2).length;
     const mmTop3 = validRows.filter((row) => row.mm_rank != null && row.mm_rank <= 3).length;
@@ -185,6 +187,7 @@ function aggregateRows(rows, groupKey) {
       mm_top2: mmTop2,
       mm_top3: mmTop3,
       mm_missing: mmMissing,
+      mm_unknown: groupRows.filter((row) => row.mm_status === "unknown").length,
       mm_top1_pct: validRows.length ? round(mmTop1 / validRows.length, 4) : null,
       near_next_under_10: validRows.filter((row) => row.near_next_under_10_daily).length,
       avg_gap_to_top1_daily: round(average(validRows.map((row) => row.gap_to_top1_daily))),
@@ -207,7 +210,9 @@ function buildRecommendations(byAirport) {
     let proposedReduction = 0;
     let action = "Monitor; no broad price change";
 
-    if (missingRate >= 0.3) {
+    if (!row.valid_checks) {
+      action = "Insufficient complete checks; resolve incomplete data before changing price";
+    } else if (missingRate >= 0.3) {
       action = "Fix MM availability/visibility before changing price";
     } else if (top1Rate >= 0.9 && medianRoom >= 10) {
       proposedFee = Math.max(5, Math.min(15, Math.floor(medianRoom / 2)));
@@ -224,6 +229,7 @@ function buildRecommendations(byAirport) {
       location: row.location,
       mm_top1_pct: row.mm_top1_pct,
       mm_missing_pct: row.valid_checks ? round(missingRate, 4) : null,
+      mm_unknown_checks: row.mm_unknown,
       median_room_if_top1_daily: row.median_room_if_top1_daily,
       median_gap_to_top1_daily: row.median_gap_to_top1_daily,
       proposed_city_fee_pln_daily: proposedFee,
@@ -236,7 +242,7 @@ function buildRecommendations(byAirport) {
 function buildCompetitorRows(detailRows) {
   const counts = new Map();
   for (const row of detailRows) {
-    if (!row.top1_provider || isMmProvider(row.top1_provider)) {
+    if (row.check_status !== "ok" || !row.top1_provider || isMmProvider(row.top1_provider)) {
       continue;
     }
     const key = `${row.location}|${row.top1_provider}`;
@@ -271,7 +277,7 @@ function buildQualityRows(payload, detailRows) {
 }
 
 function buildOverviewRows(payload, detailRows) {
-  const validRows = detailRows.filter((row) => row.top1_provider);
+  const validRows = detailRows.filter((row) => row.check_status === "ok" && row.top1_provider);
   const mmTop1 = validRows.filter((row) => row.mm_rank === 1).length;
   const gaps = validRows.map((row) => row.gap_to_top1_daily);
   const nextGaps = validRows.map((row) => row.gap_to_next_daily);
@@ -297,7 +303,8 @@ function buildOverviewRows(payload, detailRows) {
     ["Average decrease to next position PLN/day", round(average(nextGaps))],
     ["Median decrease to next position PLN/day", round(median(nextGaps))],
     ["Average room when MM is top1 PLN/day", round(average(rooms))],
-    ["Median room when MM is top1 PLN/day", round(median(rooms))]
+    ["Median room when MM is top1 PLN/day", round(median(rooms))],
+    ["MM unknown count", detailRows.filter((row) => row.mm_status === "unknown").length]
   ];
 }
 
@@ -411,6 +418,9 @@ function applySemanticHighlights(workbook) {
     });
     const rankColumn = headerMap.get("mm rank");
     const statusColumn = headerMap.get("check status");
+    if (rankColumn == null || statusColumn == null) {
+      return;
+    }
     for (let rowIndex = 5; rowIndex <= details.rowCount; rowIndex += 1) {
       const rank = Number(details.getCell(rowIndex, rankColumn).value);
       const status = details.getCell(rowIndex, statusColumn).value;
@@ -440,7 +450,7 @@ function buildWorkbook(payload) {
   const byDuration = aggregateRows(details, "rental_days");
   const recommendations = buildRecommendations(byAirport);
   const opportunities = details
-    .filter((row) => row.mm_rank > 1 && row.near_next_under_10_daily)
+    .filter((row) => row.check_status === "ok" && row.mm_rank > 1 && row.near_next_under_10_daily)
     .sort((left, right) => left.gap_to_next_daily - right.gap_to_next_daily);
   const competitors = buildCompetitorRows(details);
   const qualityRows = buildQualityRows(payload, details);

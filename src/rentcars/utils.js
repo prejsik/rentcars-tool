@@ -197,6 +197,14 @@ function compareByPriceAscending(left, right) {
   return left.totalPrice - right.totalPrice;
 }
 
+function isTargetIncomplete(scenario, location, sortOrder) {
+  const matches = (target) => normalizeWhitespace(target?.location).toLowerCase()
+    === normalizeWhitespace(location).toLowerCase()
+    && (!target.sort_order || target.sort_order === sortOrder);
+  return (scenario?.errors || []).some(matches)
+    || (scenario?.expected_targets || []).some((target) => matches(target) && target.mm_coverage_complete === false);
+}
+
 function toCsv(rows) {
   const header = [
     "requested_location",
@@ -271,6 +279,7 @@ module.exports = {
   dailyPrice,
   ensureDir,
   formatMoney,
+  isTargetIncomplete,
   makeTimestampForFile,
   normalizeWhitespace,
   parseDate,

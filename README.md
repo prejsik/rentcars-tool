@@ -11,7 +11,7 @@ This is a separate RentCars.pl scraper module based on the DiscoverCars scraper 
 - checks RentCars.pl only with the `price_insurance` sort mode
 - collects all cars by default and lets the HTML report switch between all cars and automatic transmission only
 - requires a verified protected price in `price_insurance` mode and records base and insured prices separately
-- loads the next "show more cars" result page when fewer than 3 providers are visible
+- follows further result pages within the configured limit until MM and the top three providers are covered for the required transmission views
 - in fast mode, prefers visible DOM offers and avoids long waits for optional network JSON payloads
 - retries transient location failures twice in a lower-concurrency queue
 - reports successful, failed, and missing airport checks separately from scenario progress
@@ -64,6 +64,19 @@ Generate the Excel pricing summary:
 node .\src\rentcars\reportXlsx.js .\output\rentcars-results-latest.json .\output\rentcars-summary.xlsx
 ```
 
+Report interpretation:
+
+- `Niepelne dane MM` in the HTML filter and `unknown` / `incomplete` in Excel mean MM absence could not be confirmed. These checks are excluded from confirmed absence counts and pricing aggregates. Legacy JSON files without coverage flags retain their previous interpretation.
+- Gaps to TOP1 are calculated only where MM is present and ranks below first. Room for a price increase is calculated only where MM ranks first and another provider is available. Missing values remain blank, not zero.
+- Equal-price providers retain their order in the source results in both HTML and Excel.
+- An empty partial run can still generate an Excel workbook showing its status and lack of data.
+
+Run the offline regression suite (no scraping, GitHub mutations, or Telegram messages):
+
+```powershell
+npm.cmd test
+```
+
 ## GitHub Actions
 
 The RentCars.pl GitHub workflow lives in a separate file:
@@ -72,7 +85,13 @@ The RentCars.pl GitHub workflow lives in a separate file:
 .github/workflows/rentcars-daily.yml
 ```
 
-The daily workflow groups start dates into bounded chunks, merges all chunk JSON files, deploys one final report, and sends one Telegram message. A separate `rentcars-watchdog.yml` checks the run around 06:30 and 08:30 Europe/Warsaw. It retries a failed workflow as a complete new attempt so every chunk artifact is rebuilt, starts a replacement production run when the primary run is missing, and sends a Telegram status message. A separate `rentcars-smoke.yml` workflow runs tests and a bounded scraper after pushes, but it cannot overwrite GitHub Pages or send Telegram notifications.
+The daily workflow groups start dates into bounded chunks and merges all chunk JSON files into one final report. A separate `rentcars-watchdog.yml` checks the run around 06:30 and 08:30 Europe/Warsaw and also reacts when a trusted daily run finishes unsuccessfully, including after the morning checks. Recovery is limited to three total attempts and does not start another retry while a trusted daily run is active. It retries the complete workflow so every chunk artifact is rebuilt, starts a replacement production run when the primary run is missing, and sends a Telegram status message.
+
+If collection and merging succeeded and only publication or notification failed, the watchdog reports that failure without repeating the scrape. Inconclusive job evidence blocks recovery instead of risking a duplicate run.
+
+Report generation, Pages publication, and Telegram notification are separate jobs. The notification does not need a repository checkout or approval of the Pages environment. It waits for publication only for a bounded period and includes an HTML link only when the public metadata matches the current run and attempt and the HTML endpoint returns a recognizable report. Otherwise it sends the available artifact link and workflow link without presenting an older HTML report as current. A later Pages publication does not send a second completion message.
+
+A separate `rentcars-smoke.yml` workflow runs tests and a bounded scraper after pushes, but it cannot overwrite GitHub Pages or send Telegram notifications. The smoke check requires both a successful process exit and complete JSON with no failed or missing checks; partial output cannot produce a green result.
 
 Each attempt uploads a separate merged artifact named `rentcars-results-<run number>-attempt-<attempt>` with:
 
