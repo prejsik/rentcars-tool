@@ -1,0 +1,77 @@
+name: RentCars morning status
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+      timezone: "Europe/Warsaw"
+  workflow_dispatch:
+    inputs:
+      send_notification:
+        description: "Send to Telegram (false previews the message only)"
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: read
+  pages: read
+
+concurrency:
+  group: rentcars-morning-status
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    name: Send morning RentCars status
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Prepare current status and ETA
+        id: status
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          LOCATION_CHUNK_CONCURRENCY: "6"
+        run: node src/rentcars/morningNotification.js > "$RUNNER_TEMP/rentcars-morning.txt"
+
+      - name: Send or preview morning message
+        if: always()
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SEND_NOTIFICATION: ${{ github.event_name == 'schedule' || inputs.send_notification == true }}
+          STATUS_OUTCOME: ${{ steps.status.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ "$STATUS_OUTCOME" == "success" && -s "$RUNNER_TEMP/rentcars-morning.txt" ]]; then
+            message=$(<"$RUNNER_TEMP/rentcars-morning.txt")
+          else
+            printf -v message 'RentCars.pl: status poranny 07:00.\n\nNie udalo sie odczytac biezacego postepu. ETA niedostepne; nie potwierdzono aktualnosci raportu.\n\nDiagnostyka:\n%s\n' "$RUN_URL"
+          fi
+          printf '%s\n' "$message" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$SEND_NOTIFICATION" != "true" ]]; then
+            echo "Preview only: no Telegram message sent."
+            exit 0
+          fi
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            echo "::error::Telegram secrets are missing."
+            exit 1
+          fi
+          curl --fail --show-error --silent --output /dev/null --max-time 15 \
+            --retry 3 --retry-delay 3 --retry-all-errors \
+            --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${message}" \
+            --data-urlencode "disable_web_page_preview=true"
