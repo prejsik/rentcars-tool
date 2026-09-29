@@ -1,10 +1,12 @@
 name: RentCars daily run
-run-name: ${{ inputs.watchdog_recovery == 'true' && 'RentCars watchdog recovery' || 'RentCars daily run' }}
+run-name: ${{ github.event_name == 'schedule' && github.event.schedule == '0 10 * * *' && 'RentCars daytime run' || inputs.watchdog_recovery == 'true' && 'RentCars watchdog recovery' || 'RentCars daily run' }}
 
 on:
   schedule:
     - cron: "17 23 * * *"
     - cron: "17 0 * * *"
+    - cron: "0 10 * * *"
+      timezone: "Europe/Warsaw"
   workflow_dispatch:
     inputs:
       locations:
@@ -44,6 +46,7 @@ permissions:
 
 env:
   SCHEDULE_ROLLING_DAYS: "60"
+  SCHEDULE_DAYTIME_ROLLING_DAYS: "20"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"
   SCHEDULE_SPEED_MODE: "fast"
   SCHEDULE_SORT_ORDERS: "price_insurance"
@@ -83,6 +86,12 @@ jobs:
             exit 0
           fi
 
+          if [[ "$trigger_schedule" == "0 10 * * *" ]]; then
+            echo "Daytime Warsaw trigger selected."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           scheduled_minute="${trigger_schedule%% *}"
           schedule_tail="${trigger_schedule#* }"
           scheduled_hour="${schedule_tail%% *}"
@@ -109,6 +118,8 @@ jobs:
         id: options
         shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_SCHEDULE: ${{ github.event.schedule }}
           INPUT_LOCATIONS: ${{ inputs.locations }}
           INPUT_ROLLING_DAYS: ${{ inputs.rolling_days }}
           INPUT_DURATIONS: ${{ inputs.durations }}
@@ -134,7 +145,11 @@ jobs:
 
           catalog_locations="$(node -e "const { defaultLocationCities } = require('./src/rentcars/locations'); process.stdout.write(defaultLocationCities().join(','));")"
           locations="${INPUT_LOCATIONS:-$catalog_locations}"
-          rolling_days="${INPUT_ROLLING_DAYS:-$SCHEDULE_ROLLING_DAYS}"
+          default_rolling_days="$SCHEDULE_ROLLING_DAYS"
+          if [[ "$EVENT_NAME" == "schedule" && "$TRIGGER_SCHEDULE" == "0 10 * * *" ]]; then
+            default_rolling_days="$SCHEDULE_DAYTIME_ROLLING_DAYS"
+          fi
+          rolling_days="${INPUT_ROLLING_DAYS:-$default_rolling_days}"
           durations="${INPUT_DURATIONS:-$SCHEDULE_DURATIONS}"
           speed_mode="${INPUT_SPEED_MODE:-$SCHEDULE_SPEED_MODE}"
           sort_orders="${INPUT_SORT_ORDERS:-$SCHEDULE_SORT_ORDERS}"

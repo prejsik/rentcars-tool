@@ -24,6 +24,7 @@ function trustedRun(overrides = {}) {
     conclusion: "failure",
     run_attempt: 1,
     created_at: "2026-09-27T00:00:00.000Z",
+    display_title: "RentCars daily run",
     head_branch: "main",
     head_repository: { full_name: "mmcars/rentcars" },
     repository: { full_name: "mmcars/rentcars" },
@@ -131,6 +132,69 @@ test("core failures retain rerun limit and active-run guard", async () => {
     decideCompletedRunRecovery(coreFailure, [coreFailure, newerReportingFailure], trustOptions),
     { action: "reporting_failed", runId: 806, runAttempt: 1 }
   );
+});
+
+test("daytime runs do not block recovery of a failed night profile", async () => {
+  const nightFailure = await enrich(trustedRun(), dailyJobs({ scrape: "failure", merge: "skipped" }));
+  const daytimeActive = trustedRun({
+    id: 807,
+    display_title: "RentCars daytime run",
+    status: "in_progress",
+    conclusion: null,
+    created_at: "2026-09-27T08:00:00.000Z",
+    has_scrape_jobs: true
+  });
+  const daytimeSuccess = trustedRun({
+    id: 808,
+    display_title: "RentCars daytime run",
+    conclusion: "success",
+    created_at: "2026-09-27T08:30:00.000Z",
+    has_scrape_jobs: true
+  });
+
+  assert.deepEqual(
+    decideCompletedRunRecovery(nightFailure, [nightFailure, daytimeActive], trustOptions),
+    { action: "rerun", runId: 801, runAttempt: 1 }
+  );
+  assert.deepEqual(
+    decideCompletedRunRecovery(nightFailure, [nightFailure, daytimeSuccess], trustOptions),
+    { action: "rerun", runId: 801, runAttempt: 1 }
+  );
+});
+
+test("an active night run does not block recovery of a failed daytime profile", async () => {
+  const daytimeFailure = await enrich(
+    trustedRun({ display_title: "RentCars daytime run" }),
+    dailyJobs({ scrape: "failure", merge: "skipped" })
+  );
+  const nightActive = trustedRun({
+    id: 809,
+    status: "in_progress",
+    conclusion: null,
+    created_at: "2026-09-27T08:30:00.000Z",
+    has_scrape_jobs: true
+  });
+
+  assert.deepEqual(
+    decideCompletedRunRecovery(daytimeFailure, [daytimeFailure, nightActive], trustOptions),
+    { action: "rerun", runId: 801, runAttempt: 1 }
+  );
+});
+
+test("morning classification ignores the daytime profile", async () => {
+  const nightFailure = await enrich(trustedRun(), dailyJobs({ scrape: "failure", merge: "skipped" }));
+  const daytimeActive = trustedRun({
+    id: 810,
+    display_title: "RentCars daytime run",
+    status: "in_progress",
+    conclusion: null,
+    created_at: "2026-09-27T04:00:00.000Z",
+    has_scrape_jobs: true
+  });
+
+  assert.deepEqual(scheduledDecision([nightFailure, daytimeActive]), {
+    action: "rerun", runId: 801, runAttempt: 1
+  });
 });
 
 test("current or newer relevant job-evidence errors fail closed", async () => {

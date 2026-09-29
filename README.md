@@ -109,11 +109,11 @@ Per-chunk JSON, logs, and failure artifacts remain in separate short-lived chunk
 
 During long scheduled runs, every date chunk writes JSON snapshots after each completed duration. Failed workflows are retried as complete attempts because GitHub does not reliably retain successful chunk artifacts across a failed-jobs-only rerun. Complementary scenario results are still merged within the available attempt data before publication.
 
-The scheduled GitHub profile is:
+The scheduled GitHub profiles share all settings except the pickup-date horizon:
 
-- around `01:17 Europe/Warsaw`
+- `01:17 Europe/Warsaw`: 60 rolling pickup dates from tomorrow (unchanged)
+- `10:00 Europe/Warsaw`: 20 rolling pickup dates from tomorrow, using a timezone-aware schedule
 - all locations from `src/rentcars/locations.json`
-- `rolling_days: 60`
 - `durations: 2,3,4,5,6,7,8,9,10,11,12,13,14`
 - `sort_orders: price_insurance`
 - `speed_mode: fast`
@@ -124,6 +124,8 @@ The scheduled GitHub profile is:
 
 Manual GitHub runs can override locations, rolling days, durations, and speed mode from the `workflow_dispatch` form.
 Telegram notifications use the repository `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets.
+Both scheduled runs use these same secrets and publish to the same Pages HTML URL; the newer report replaces the older one. The 10:00 profile has 260 date/duration scenarios, 2340 airport checks, and seven chunks. GitHub may delay scheduled starts. Rerunning a scheduled attempt retains its original schedule profile; manual runs keep the 60-day default unless overridden.
+The 10:00 run is named `RentCars daytime run`. Completion-triggered recovery treats the daytime and night profiles separately, so a shorter report cannot replace recovery of the 60-day collection. Existing morning watchdog checkpoints check only the night profile; they do not detect a missing daytime trigger.
 
 Using CLI arguments:
 

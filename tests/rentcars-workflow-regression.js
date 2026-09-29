@@ -192,6 +192,73 @@ test("daily schedule retains 60 rolling dates and durations 2 through 14", () =>
   assert.equal(inputs.durations.default, "2,3,4,5,6,7,8,9,10,11,12,13,14");
 });
 
+test("10:00 Warsaw schedule adds 20 dates without changing the night profile or Telegram secrets", () => {
+  const daily = workflow(".github/workflows/rentcars-daily.yml");
+  assert.deepEqual(daily.on.schedule, [
+    { cron: "17 23 * * *" }, { cron: "17 0 * * *" },
+    { cron: "0 10 * * *", timezone: "Europe/Warsaw" }
+  ]);
+  assert.equal(daily.env.SCHEDULE_DAYTIME_ROLLING_DAYS, "20");
+  assert.equal(daily["run-name"], "${{ github.event_name == 'schedule' && github.event.schedule == '0 10 * * *' && 'RentCars daytime run' || inputs.watchdog_recovery == 'true' && 'RentCars watchdog recovery' || 'RentCars daily run' }}");
+  const send = daily.jobs.notify.steps.find(step => step.name === "Send Telegram notification");
+  assert.equal(send.env.TELEGRAM_BOT_TOKEN, "${{ secrets.TELEGRAM_BOT_TOKEN }}");
+  assert.equal(send.env.TELEGRAM_CHAT_ID, "${{ secrets.TELEGRAM_CHAT_ID }}");
+});
+
+test("schedule gate and matrix retain day, night, retry and manual date ranges", () => {
+  const daily = workflow(".github/workflows/rentcars-daily.yml");
+  const gate = daily.jobs.plan.steps.find(step => step.id === "gate");
+  const options = daily.jobs.plan.steps.find(step => step.id === "options");
+  assert.equal(options.env.EVENT_NAME, "${{ github.event_name }}");
+  assert.equal(options.env.TRIGGER_SCHEDULE, "${{ github.event.schedule }}");
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const cases = [
+    ["schedule", "0 10 * * *", "2026-07-15", true, 20, ""],
+    ["schedule", "0 10 * * *", "2026-12-15", true, 20, ""],
+    ["schedule", "17 23 * * *", "2026-07-15", true, 60, ""],
+    ["schedule", "17 0 * * *", "2026-12-15", true, 60, ""],
+    ["schedule", "17 0 * * *", "2026-07-15", false, 0, ""],
+    ["schedule", "17 23 * * *", "2026-12-15", false, 0, ""],
+    ["workflow_dispatch", "", "2026-07-15", true, 7, "7"]
+  ];
+  for (const [event, cron, date, shouldRun, expectedDays, inputDays] of cases) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rentcars-schedule-"));
+    try {
+      const output = path.join(dir, "output.txt").replace(/\\/g, "/");
+      const interpolate = (source) => source.replaceAll("${{ github.event.schedule }}", cron)
+        .replaceAll("${{ github.event_name }}", event)
+        .replaceAll("${{ steps.gate.outputs.should_run }}", String(shouldRun));
+      const env = { ...process.env, ...daily.env, GITHUB_OUTPUT: output, GITHUB_RUN_ATTEMPT: "2",
+        EVENT_NAME: event, TRIGGER_SCHEDULE: cron, INPUT_ROLLING_DAYS: inputDays,
+        INPUT_LOCATIONS: "", INPUT_DURATIONS: "", INPUT_SPEED_MODE: "",
+        INPUT_SORT_ORDERS: "", INPUT_LOCATION_CONCURRENCY: "" };
+      const [minute = "0", hour = "0"] = cron ? cron.split(" ") : [];
+      const mappedHour = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Warsaw", hour: "2-digit", hourCycle: "h23" })
+        .format(new Date(`${date}T${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:00Z`));
+      // Git Bash on Windows does not ship the Linux IANA timezone database.
+      const gateResult = spawnSync(bash, ["-eo", "pipefail", "-c",
+        `date() { if [[ "$*" == '-u +%Y-%m-%d' ]]; then echo '${date}'; elif [[ "$1" == '-d' && "$3" == '+%H' ]]; then echo '${mappedHour}'; else command date "$@"; fi; };\n${interpolate(gate.run)}`],
+        { cwd: ROOT, env, encoding: "utf8" });
+      assert.equal(gateResult.status, 0, gateResult.stderr);
+      assert.match(fs.readFileSync(output, "utf8"), new RegExp(`should_run=${shouldRun}`), `${date}: ${event} ${cron}`);
+      // The full matrix is exercised once per profile; winter uses the same cron identity.
+      if (date === "2026-12-15") continue;
+      const result = spawnSync(bash, ["-eo", "pipefail", "-c", interpolate(options.run)], { cwd: ROOT, env, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      const values = Object.fromEntries(fs.readFileSync(output, "utf8").trim().split(/\r?\n/).map(line => {
+        const index = line.indexOf("="); return [line.slice(0, index), line.slice(index + 1)];
+      }));
+      assert.equal(Number(values.rolling_days), expectedDays);
+      assert.equal(Number(values.expected_scenario_count), expectedDays * 13);
+      assert.equal(Number(values.expected_check_count), expectedDays * 13 * 9);
+      if (shouldRun) {
+        assert.equal(values.start_dates.split(",").length, expectedDays);
+        assert.equal(JSON.parse(values.matrix).include.length, Math.ceil(expectedDays / 3));
+      }
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
 test("notification formatter preserves blank lines and alerts only when MM is absent for the whole date", () => {
   const { buildDailyNotification } = require("../src/rentcars/dailyNotification");
   const scenario = (startDate, rentalDays, providerName) => ({

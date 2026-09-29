@@ -14,6 +14,7 @@ const MERGE_JOB_NAMES = new Set([
   "Merge RentCars.pl report",
   "Merge and publish RentCars.pl report"
 ]);
+const DAYTIME_RUN_TITLE = "RentCars daytime run";
 
 function timestamp(value) {
   const parsed = Date.parse(value);
@@ -23,6 +24,12 @@ function timestamp(value) {
 function isWatchdogRecovery(run) {
   return run?.event === "workflow_dispatch"
     && String(run?.display_title || "") === "RentCars watchdog recovery";
+}
+
+function recoveryProfile(run) {
+  return run?.event === "schedule" && String(run?.display_title || "") === DAYTIME_RUN_TITLE
+    ? "daytime"
+    : "night";
 }
 
 async function includeTriggeredRun(runs, options = {}) {
@@ -180,7 +187,8 @@ function decideCompletedRunRecovery(triggeredRun, runs, options = {}) {
   }
 
   const trustedRuns = (Array.isArray(runs) ? runs : [])
-    .filter((run) => isTrustedDailyRun(run, options));
+    .filter((run) => isTrustedDailyRun(run, options))
+    .filter((run) => recoveryProfile(run) === recoveryProfile(triggeredRun));
   const currentRun = trustedRuns
     .filter((run) => Number(run?.id) === Number(triggeredRun.id))
     .sort((left, right) => (Number(right?.run_attempt) || 1) - (Number(left?.run_attempt) || 1))[0]
@@ -297,6 +305,7 @@ function classifyDailyRuns(runs, options = {}) {
   const maxAgeMs = Number(options.maxAgeMs) || 12 * 60 * 60 * 1000;
   const recentRuns = (Array.isArray(runs) ? runs : [])
     .filter((run) => run?.event === "schedule" || isWatchdogRecovery(run))
+    .filter((run) => recoveryProfile(run) === "night")
     .filter((run) => !options.repository || isTrustedDailyRun(run, options))
     .filter((run) => {
       const createdAt = timestamp(run?.created_at);
