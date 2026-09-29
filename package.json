@@ -9,7 +9,7 @@
     "rentcars:merge": "node src/rentcars/mergeResults.js --input-dir downloaded-parts --output-json output/rentcars-results-latest.json",
     "rentcars:report": "node src/rentcars/reportHtml.js output/rentcars-results-latest.json output/rentcars-report.html",
     "rentcars:xlsx": "node src/rentcars/reportXlsx.js output/rentcars-results-latest.json output/rentcars-summary.xlsx",
-    "test": "node --test tests/run-rentcars-tests.js tests/rentcars-report-regression.js tests/rentcars-pagination-regression.js tests/rentcars-merge-coverage-regression.js tests/rentcars-parser-regression.js tests/rentcars-price-mapping-regression.js tests/rentcars-workflow-regression.js tests/rentcars-watchdog-recovery-regression.js tests/rentcars-morning-regression.js"
+    "test": "node --test tests/run-rentcars-tests.js tests/rentcars-report-regression.js tests/rentcars-pagination-regression.js tests/rentcars-merge-coverage-regression.js tests/rentcars-parser-regression.js tests/rentcars-price-mapping-regression.js tests/rentcars-workflow-regression.js tests/rentcars-watchdog-recovery-regression.js tests/rentcars-morning-regression.js tests/rentcars-search-submit-regression.js"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

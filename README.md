@@ -89,6 +89,8 @@ The daily workflow groups start dates into bounded chunks and merges all chunk J
 
 If collection and merging succeeded and only publication or notification failed, the watchdog reports that failure without repeating the scrape. Inconclusive job evidence blocks recovery instead of risking a duplicate run.
 
+If GitHub's recent-runs list omits the run from a completion event, the watchdog reads that exact run directly before inspecting its jobs. It checks the latest status so an already active retry is not restarted. Search-form submission also waits for the button and result state within the configured timeout, clicks once, and preserves click/navigation errors instead of mislabeling them as a missing button.
+
 Report generation, Pages publication, and Telegram notification are separate jobs. The notification does not need a repository checkout or approval of the Pages environment. It waits for publication only for a bounded period and includes an HTML link only when the public metadata matches the current run and attempt and the HTML endpoint returns a recognizable report. Otherwise it sends the available artifact link and workflow link without presenting an older HTML report as current. A later Pages publication does not send a second completion message.
 
 The separate `rentcars-morning.yml` workflow schedules a morning Telegram status at **07:00 Europe/Warsaw**, with daylight-saving time handled by the schedule timezone. GitHub may delay the trigger; the message includes the actual inspection time. It inspects only today's trusted daily/recovery run and its current attempt, without starting collection or publishing anything. Existing completion notifications remain enabled.

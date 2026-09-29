@@ -1211,55 +1211,32 @@ class RentCarsScraper {
     await this.acceptCookies(page);
     await this.dismissObstructiveOverlays(page);
 
-    const directButtons = [
+    const buttons = [
       page.locator("#elementsubmit").first(),
       page.locator("button[name='elementsubmit']").first(),
-      page.locator("#form-cars-search button").filter({ hasText: /szukaj/i }).first()
+      page.locator("#form-cars-search button").filter({ hasText: /szukaj/i }).first(),
+      ...SEARCH_BUTTON_PATTERNS.map((pattern) => page.getByRole("button", { name: pattern }).first()),
+      page.locator("button, a").filter({ hasText: /search/i }).first()
     ];
-
-    for (const button of directButtons) {
-      if (await button.isVisible().catch(() => false)) {
-        await Promise.allSettled([
-          page.waitForLoadState("domcontentloaded", { timeout: this.config.timeoutMs }),
-          button.click({ timeout: 4000, force: true })
-        ]);
-        await page.waitForTimeout(1200);
-        if (await this.looksLikeSearchPage(page)) {
-          return;
-        }
-        if (await this.hasPickupLocationValidationError(page)) {
-          throw new Error("Pick-up location was not accepted by RentCars.pl.");
-        }
+    const timeoutMs = clampPositiveInteger(this.config.timeoutMs, 30000);
+    const buttonDeadline = Date.now() + timeoutMs;
+    do {
+      for (const button of buttons) {
+        if (!(await button.isVisible().catch(() => false))) continue;
+        // Submit once, then wait for evidence instead of clicking again during navigation.
+        await button.click({ timeout: timeoutMs });
+        const resultDeadline = Date.now() + timeoutMs;
+        do {
+          if (await this.hasPickupLocationValidationError(page)) {
+            throw new Error("Pick-up location was not accepted by RentCars.pl.");
+          }
+          if (await this.looksLikeSearchPage(page)) return;
+          await page.waitForTimeout(250);
+        } while (Date.now() < resultDeadline);
+        throw new Error("Search submission timed out waiting for RentCars.pl results.");
       }
-    }
-
-    for (const pattern of SEARCH_BUTTON_PATTERNS) {
-      const button = page.getByRole("button", { name: pattern }).first();
-      if (await button.isVisible().catch(() => false)) {
-        await Promise.allSettled([
-          page.waitForLoadState("domcontentloaded", { timeout: this.config.timeoutMs }),
-          button.click({ timeout: 4000 })
-        ]);
-        await page.waitForTimeout(800);
-        if (!(await this.looksLikeSearchPage(page)) && (await this.hasPickupLocationValidationError(page))) {
-          throw new Error("Pick-up location was not accepted by RentCars.pl.");
-        }
-        return;
-      }
-    }
-
-    const fallback = page.locator("button, a").filter({ hasText: /search/i }).first();
-    if (await fallback.isVisible().catch(() => false)) {
-      await Promise.allSettled([
-        page.waitForLoadState("domcontentloaded", { timeout: this.config.timeoutMs }),
-        fallback.click({ timeout: 4000 })
-      ]);
-      await page.waitForTimeout(800);
-      if (!(await this.looksLikeSearchPage(page)) && (await this.hasPickupLocationValidationError(page))) {
-        throw new Error("Pick-up location was not accepted by RentCars.pl.");
-      }
-      return;
-    }
+      await page.waitForTimeout(250);
+    } while (Date.now() < buttonDeadline);
 
     throw new Error("Could not find the RentCars.pl search button.");
   }

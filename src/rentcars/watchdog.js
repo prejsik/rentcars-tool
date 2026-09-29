@@ -25,6 +25,72 @@ function isWatchdogRecovery(run) {
     && String(run?.display_title || "") === "RentCars watchdog recovery";
 }
 
+async function includeTriggeredRun(runs, options = {}) {
+  const env = options.env || process.env;
+  const availableRuns = Array.isArray(runs) ? runs : [];
+  if (env.WATCHDOG_MODE !== "workflow_run") {
+    return availableRuns;
+  }
+
+  const runId = Number(env.WATCHDOG_TRIGGER_RUN_ID);
+  if (!runId || availableRuns.some((run) => Number(run?.id) === runId)) {
+    return availableRuns;
+  }
+
+  const repository = String(env.WATCHDOG_REPOSITORY || "");
+  const defaultBranch = String(env.WATCHDOG_DEFAULT_BRANCH || "");
+  const apiUrl = String(env.GITHUB_API_URL || "https://api.github.com").replace(/\/$/, "");
+  const runUrl = `${apiUrl}/repos/${repository}/actions/runs/${runId}`;
+  const eventRun = {
+    id: runId,
+    event: env.WATCHDOG_TRIGGER_EVENT,
+    status: env.WATCHDOG_TRIGGER_STATUS,
+    conclusion: env.WATCHDOG_TRIGGER_CONCLUSION,
+    run_attempt: Number(env.WATCHDOG_TRIGGER_ATTEMPT) || 1,
+    created_at: env.WATCHDOG_TRIGGER_CREATED_AT,
+    display_title: env.WATCHDOG_TRIGGER_TITLE,
+    head_branch: env.WATCHDOG_TRIGGER_BRANCH,
+    head_repository: { full_name: env.WATCHDOG_TRIGGER_REPOSITORY },
+    repository: { full_name: repository }
+  };
+
+  try {
+    const token = options.token || env.GITHUB_TOKEN;
+    const fetchImpl = options.fetchImpl || globalThis.fetch;
+    if (!repository || !defaultBranch || !token || typeof fetchImpl !== "function") {
+      throw new Error("Repository, default branch, GITHUB_TOKEN, and fetch are required.");
+    }
+    const response = await fetchImpl(runUrl, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status || "unknown"}`);
+    }
+    const exactRun = await response.json();
+    if (Number(exactRun?.id) !== runId || !isTrustedDailyRun(exactRun, { repository, defaultBranch })) {
+      throw new Error("The exact run response did not match the trusted triggered run.");
+    }
+    return [...availableRuns, {
+      ...exactRun,
+      jobs_url: `${runUrl}/jobs`
+    }];
+  } catch (error) {
+    return [...availableRuns, {
+      ...eventRun,
+      has_scrape_jobs: null,
+      core_jobs_succeeded: null,
+      reporting_jobs_failed: null,
+      reporting_only_failure: null,
+      job_evidence_error: `Could not inspect exact run metadata: ${error instanceof Error ? error.message : String(error)}`
+    }];
+  }
+}
+
 function isTrustedDailyRun(run, options = {}) {
   const repository = String(options.repository || "");
   const defaultBranch = String(options.defaultBranch || "");
@@ -167,7 +233,7 @@ async function enrichRunJobEvidence(runs, options = {}) {
   const token = options.token || process.env.GITHUB_TOKEN;
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   return Promise.all((Array.isArray(runs) ? runs : []).map(async (run) => {
-    if (typeof run?.has_scrape_jobs === "boolean") {
+    if (typeof run?.has_scrape_jobs === "boolean" || run?.job_evidence_error) {
       return run;
     }
     try {
@@ -293,7 +359,9 @@ function classifyDailyRuns(runs, options = {}) {
 
 async function main() {
   const input = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
-  const runs = Array.isArray(input) ? input : input.workflow_runs;
+  const runs = await includeTriggeredRun(
+    Array.isArray(input) ? input : input.workflow_runs
+  );
   const enrichedRuns = await enrichRunJobEvidence(runs);
   for (const run of enrichedRuns.filter((entry) => entry?.job_evidence_error)) {
     console.error(`Watchdog warning for run ${run.id}: ${run.job_evidence_error}`);
@@ -354,6 +422,7 @@ module.exports = {
   classifyDailyRuns,
   decideCompletedRunRecovery,
   enrichRunJobEvidence,
+  includeTriggeredRun,
   isTrustedDailyRun,
   selectNewestPrimaryRun
 };
