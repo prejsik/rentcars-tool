@@ -87,6 +87,26 @@ test("older attempt and a changing public manifest cannot overwrite a report", a
   }), /changed/);
 });
 
+test("explicit recovery replaces only the named incomplete run with a complete matching-size report", async () => {
+  const incomplete = candidate("morning", "29", "old-run");
+  incomplete.metadata = { ...incomplete.metadata, run_status: "complete_with_errors",
+    expected_check_count: 7020, expected_scenario_count: 780 };
+  const current = await buildSite({ ...options(), ...incomplete });
+  const complete = candidate("morning", "28", "recovery");
+  complete.metadata = { ...complete.metadata, run_status: "complete", expected_check_count: 7020,
+    successful_check_count: 7020, failed_check_count: 0, missing_check_count: 0,
+    expected_scenario_count: 780, completed_scenario_count: 780 };
+  const config = { ...options(current.files), ...complete, replaceRunId: "old-run" };
+  const restored = await buildSite(config);
+  assert.equal(restored.publish, true);
+  assert.equal(restored.files["morning/report.html"], complete.html);
+  assert.equal(JSON.parse(restored.files["morning/report-meta.json"]).execution_started_at, complete.metadata.execution_started_at);
+  await assert.rejects(buildSite({ ...config, replaceRunId: "different-run" }), /recovery/i);
+  await assert.rejects(buildSite({ ...config, metadata: { ...complete.metadata, failed_check_count: 1 } }), /recovery/i);
+  await assert.rejects(buildSite({ ...config, metadata: { ...complete.metadata, expected_check_count: 100 } }), /recovery/i);
+  await assert.rejects(buildSite({ ...config, ...options(restored.files), replaceRunId: "recovery" }), /recovery/i);
+});
+
 test("post-deployment verification checks both report bodies, not just root metadata", async () => {
   const first = await buildSite({ ...options(), ...candidate("morning", "27") });
   const result = await buildSite({ ...options(first.files), ...candidate("afternoon", "28") });

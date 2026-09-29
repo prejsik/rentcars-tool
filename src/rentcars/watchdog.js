@@ -67,9 +67,10 @@ async function includeTriggeredRun(runs, options = {}) {
     if (!repository || !defaultBranch || !token || typeof fetchImpl !== "function") {
       throw new Error("Repository, default branch, GITHUB_TOKEN, and fetch are required.");
     }
-    const response = await fetchImpl(runUrl, {
+    const response = await fetchImpl(`${runUrl}?inspection=${Date.now()}`, {
       headers: {
         Accept: "application/vnd.github+json",
+        "Cache-Control": "no-cache",
         Authorization: `Bearer ${token}`,
         "X-GitHub-Api-Version": "2022-11-28"
       },
@@ -253,12 +254,14 @@ async function enrichRunJobEvidence(runs, options = {}) {
       }
 
       const separator = String(run.jobs_url).includes("?") ? "&" : "?";
-      const response = await fetchImpl(`${run.jobs_url}${separator}per_page=100`, {
+      const response = await fetchImpl(`${run.jobs_url}${separator}per_page=100&inspection=${run.id}-${run.run_attempt || 1}-${Date.now()}`, {
         headers: {
           Accept: "application/vnd.github+json",
+          "Cache-Control": "no-cache",
           Authorization: `Bearer ${token}`,
           "X-GitHub-Api-Version": "2022-11-28"
-        }
+        },
+        signal: AbortSignal.timeout(15000)
       });
       if (!response.ok) {
         throw new Error(`Could not inspect jobs for run ${run.id}: HTTP ${response.status || "unknown"}.`);

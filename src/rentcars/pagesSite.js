@@ -25,7 +25,7 @@ function newer(a, b) {
 }
 
 async function buildSite({ profile, metadata, html, baseUrl, pagesExists = true,
-  resolveLegacyProfile, fetchImpl = globalThis.fetch }) {
+  resolveLegacyProfile, replaceRunId = "", fetchImpl = globalThis.fetch }) {
   if (!PROFILES.includes(profile) || metadata.report_profile !== profile) throw new Error("Invalid report profile.");
   validate(metadata, html);
   const prefix = baseUrl.replace(/\/$/, "") + "/";
@@ -70,7 +70,21 @@ async function buildSite({ profile, metadata, html, baseUrl, pagesExists = true,
     }
     if (await read("report-meta.json") !== rootText) throw new Error("Pages changed while preparing the site; publication blocked.");
   }
-  if (reports[profile] && newer(reports[profile].metadata, metadata)) return { publish: false, files: {} };
+  if (replaceRunId) {
+    const current = reports[profile]?.metadata;
+    const complete = metadata.run_status === "complete" && metadata.expected_check_count > 0
+      && metadata.successful_check_count === metadata.expected_check_count
+      && metadata.failed_check_count === 0 && metadata.missing_check_count === 0
+      && metadata.completed_scenario_count === metadata.expected_scenario_count;
+    if (!current || String(current.run_id) !== String(replaceRunId)
+      || !["partial", "complete_with_errors"].includes(current.run_status) || !complete
+      || current.expected_check_count !== metadata.expected_check_count
+      || current.expected_scenario_count !== metadata.expected_scenario_count) {
+      throw new Error("Recovery can replace only the named incomplete report with a complete report of matching size.");
+    }
+  } else if (reports[profile] && newer(reports[profile].metadata, metadata)) {
+    return { publish: false, files: {} };
+  }
   reports[profile] = { metadata, metaText: serialize(metadata), html };
   const files = {};
   const manifest = {};
@@ -110,6 +124,7 @@ async function main() {
   }
   const result = await buildSite({
     profile: process.env.REPORT_PROFILE,
+    replaceRunId: process.env.REPLACE_REPORT_RUN_ID || "",
     metadata: JSON.parse(fs.readFileSync("output/rentcars-report-meta.json", "utf8")),
     html: fs.readFileSync("output/rentcars-report.html", "utf8"),
     baseUrl, pagesExists: site.status === 200,

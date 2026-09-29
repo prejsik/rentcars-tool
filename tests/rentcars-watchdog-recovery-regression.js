@@ -2,6 +2,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
+const { spawnSync } = require("node:child_process");
+const { yaml } = require("../node_modules/playwright-core/lib/utilsBundle");
 
 const {
   classifyDailyRuns,
@@ -254,7 +257,7 @@ test("missing workflow_run metadata is read exactly before inspecting active att
   const requestedUrls = [];
   const fetchImpl = async (url) => {
     requestedUrls.push(url);
-    if (!url.endsWith("/jobs?per_page=100")) {
+    if (!new URL(url).pathname.endsWith("/jobs")) {
       return {
         ok: true,
         json: async () => trustedRun({
@@ -285,10 +288,12 @@ test("missing workflow_run metadata is read exactly before inspecting active att
     fetchImpl
   });
 
-  assert.deepEqual(requestedUrls, [
+  assert.deepEqual(requestedUrls.map((url) => new URL(url).origin + new URL(url).pathname), [
     "https://api.github.com/repos/mmcars/rentcars/actions/runs/801",
-    "https://api.github.com/repos/mmcars/rentcars/actions/runs/801/jobs?per_page=100"
+    "https://api.github.com/repos/mmcars/rentcars/actions/runs/801/jobs"
   ]);
+  assert.equal(new URL(requestedUrls[1]).searchParams.get("per_page"), "100");
+  assert.ok(requestedUrls.every((url) => new URL(url).searchParams.has("inspection")));
   assert.deepEqual(
     decideCompletedRunRecovery(trustedRun(), enrichedRuns, trustOptions),
     { action: "monitor", runId: 801, runAttempt: 2 }
@@ -327,7 +332,7 @@ test("missing completed run recovers failed collection but does not rerun report
   ]) {
     const fetchImpl = async (url) => ({
       ok: true,
-      json: async () => url.endsWith("/jobs?per_page=100") ? { jobs } : trustedRun()
+      json: async () => new URL(url).pathname.endsWith("/jobs") ? { jobs } : trustedRun()
     });
     const runs = await includeTriggeredRun([], { env: workflowRunEnv, token: "test-token", fetchImpl });
     const enriched = await enrichRunJobEvidence(runs, { token: "test-token", fetchImpl });
@@ -335,6 +340,50 @@ test("missing completed run recovers failed collection but does not rerun report
       action, runId: 801, runAttempt: 1
     });
   }
+});
+
+test("a newer successful replacement suppresses late alerts and retries for an exhausted old run", async () => {
+  const old = await enrich(trustedRun({ run_attempt: 3 }), dailyJobs({ scrape: "failure" }));
+  const replacement = await enrich(trustedRun({ id: 900, event: "workflow_dispatch",
+    display_title: "RentCars watchdog recovery", conclusion: "success",
+    created_at: "2026-09-27T13:13:10Z" }), dailyJobs());
+  assert.deepEqual(decideCompletedRunRecovery(old, [old, replacement], trustOptions), {
+    action: "none", runId: null, runAttempt: 0
+  });
+});
+
+test("workflow inspection bypasses a cached run list and sees the completed replacement", () => {
+  const workflow = yaml.parse(fs.readFileSync(path.join(ROOT, ".github/workflows/rentcars-watchdog.yml"), "utf8"));
+  const step = workflow.jobs.watchdog.steps.find((item) => item.name === "Inspect recent RentCars daily runs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "rentcars-watchdog-cache-"));
+  const old = trustedRun({ run_attempt: 3, has_scrape_jobs: true });
+  const replacement = trustedRun({ id: 900, event: "workflow_dispatch", display_title: "RentCars watchdog recovery",
+    conclusion: "success", has_scrape_jobs: true, created_at: "2026-09-27T13:13:10Z" });
+  const fixturePath = path.join(directory, "bash-env.sh");
+  const outputPath = path.join(directory, "outputs.txt");
+  fs.writeFileSync(fixturePath, [
+    "curl() {",
+    "  local argument",
+    "  for argument in \"$@\"; do",
+    "    if [[ \"$argument\" == https://*inspection=* ]]; then printf '%s' \"$FRESH_RUNS\"; return 0; fi",
+    "  done",
+    "  printf '%s' \"$CACHED_RUNS\"",
+    "}", "export -f curl"
+  ].join("\n"));
+  try {
+    const result = spawnSync(process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash",
+      ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step.run], {
+        cwd: ROOT, encoding: "utf8", env: { ...process.env, ...workflowRunEnv,
+          BASH_ENV: fixturePath.replaceAll("\\", "/"), GITHUB_OUTPUT: outputPath.replaceAll("\\", "/"),
+          GITHUB_TOKEN: "test-token", GITHUB_REPOSITORY: "mmcars/rentcars", GITHUB_RUN_ID: "901", GITHUB_RUN_ATTEMPT: "1",
+          DEFAULT_BRANCH: "main", WATCHDOG_TRIGGER_ATTEMPT: "3",
+          CACHED_RUNS: JSON.stringify({ workflow_runs: [old] }),
+          FRESH_RUNS: JSON.stringify({ workflow_runs: [replacement, old] }) }
+      });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(fs.readFileSync(outputPath, "utf8"), /action=none/);
+    assert.doesNotMatch(fs.readFileSync(outputPath, "utf8"), /exhausted|rerun/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("watchdog reports reporting-only failure without dispatching or rerunning", () => {

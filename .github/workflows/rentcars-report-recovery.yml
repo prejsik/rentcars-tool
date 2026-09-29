@@ -1,0 +1,113 @@
+name: RentCars report recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Daily run containing a complete merged report
+        required: true
+        type: string
+      source_attempt:
+        description: Attempt containing the report
+        required: true
+        default: "1"
+        type: string
+      replace_run_id:
+        description: Exact incomplete published run to replace (optional)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: rentcars-pages-publication
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.pages-deployment.outputs.page_url }}
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_ATTEMPT: ${{ inputs.source_attempt }}
+    steps:
+      - name: Checkout publication code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Inspect source report
+        id: source
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          (async () => {
+            const sourceRunId = process.env.SOURCE_RUN_ID;
+            const sourceAttempt = process.env.SOURCE_ATTEMPT;
+            if (!/^\d+$/.test(sourceRunId) || !/^[1-9]\d*$/.test(sourceAttempt)) throw new Error('Invalid source run or attempt.');
+            let sequence = 0;
+            const api = async (suffix) => {
+              const response = await fetch(`${process.env.GITHUB_API_URL}/repos/${process.env.GITHUB_REPOSITORY}/${suffix}?inspection=${process.env.GITHUB_RUN_ID}-${Date.now()}-${++sequence}`, {
+                headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'Cache-Control': 'no-cache' },
+                signal: AbortSignal.timeout(15000)
+              });
+              if (!response.ok) throw new Error(`Source inspection failed: HTTP ${response.status}.`);
+              return response.json();
+            };
+            const workflow = await api('actions/workflows/rentcars-daily.yml');
+            const run = await api(`actions/runs/${sourceRunId}/attempts/${sourceAttempt}`);
+            if (String(run.id) !== sourceRunId || run.run_attempt !== Number(sourceAttempt)
+              || run.workflow_id !== workflow.id || run.status !== 'completed' || run.head_branch !== 'main'
+              || run.repository?.full_name !== process.env.GITHUB_REPOSITORY
+              || run.head_repository?.full_name !== process.env.GITHUB_REPOSITORY
+              || !Number.isInteger(run.run_number) || run.run_number < 1) throw new Error('Source must be a completed daily run from the trusted main branch.');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `artifact_name=rentcars-results-${run.run_number}-attempt-${sourceAttempt}\n`);
+          })().catch(error => { console.error(error.message); process.exitCode = 1; });
+          NODE
+      - name: Download source report
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.source.outputs.artifact_name }}
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+          path: output
+      - name: Validate complete source report
+        id: validation
+        run: node src/rentcars/recoverReport.js
+      - name: Prepare report publication
+        id: freshness
+        env:
+          REPORT_PROFILE: ${{ steps.validation.outputs.report_profile }}
+          REPLACE_REPORT_RUN_ID: ${{ inputs.replace_run_id }}
+        run: node src/rentcars/pagesSite.js
+      - name: Configure GitHub Pages
+        if: steps.freshness.outputs.publish == 'true'
+        uses: actions/configure-pages@v5
+      - name: Upload GitHub Pages artifact
+        if: steps.freshness.outputs.publish == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          name: github-pages-attempt-${{ github.run_attempt }}
+          path: pages
+      - name: Deploy GitHub Pages
+        id: pages-deployment
+        if: steps.freshness.outputs.publish == 'true'
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-attempt-${{ github.run_attempt }}
+      - name: Verify published report slots
+        if: steps.pages-deployment.outcome == 'success'
+        run: node src/rentcars/pagesSite.js --verify

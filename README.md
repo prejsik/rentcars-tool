@@ -133,6 +133,10 @@ Each deployment preserves the other profile and compares freshness only within i
 The 10:00 profile has 260 date/duration scenarios, 2340 airport checks, and seven chunks. GitHub may delay scheduled starts. Rerunning a scheduled attempt retains its original schedule profile; manual runs keep the 60-day default unless overridden and publish in the morning slot.
 The 10:00 run is named `RentCars daytime run`. Completion-triggered recovery treats the daytime and night profiles separately, so a shorter report cannot replace recovery of the 60-day collection. Existing morning watchdog checkpoints check only the night profile; they do not detect a missing daytime trigger.
 
+Watchdog run and job requests use a fresh inspection key to avoid making retry decisions from a cached GitHub response. A completed replacement suppresses further retries and exhausted-attempt alerts for the older run.
+
+`RentCars report recovery` can republish an existing complete merged artifact without scraping again. Select its source run and attempt. Replacing an incomplete newer report also requires its exact run ID; the replacement must have matching scenario/check counts and no failed or missing checks. Normal scheduled publication still uses the freshness guard.
+
 Using CLI arguments:
 
 ```powershell
