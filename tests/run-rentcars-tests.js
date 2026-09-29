@@ -846,6 +846,8 @@ runTest("daily Telegram message preserves blank lines between links", () => {
 
   const formatter = fs.readFileSync("src/rentcars/dailyNotification.js", "utf8");
   assert.match(formatter, /RentCars\.pl: run finished/);
+  assert.ok(daily.includes('profile_url="${pages_url}${REPORT_PROFILE}/"'));
+  assert.ok(daily.includes('page_url="$profile_url"'));
   assert.match(daily, /printf -v section '\\n\\nCurrent HTML report:\\n%sreport\.html\\n\\n'/);
   assert.match(daily, /printf -v section 'Artifact backup:\\n%s\\n\\n'/);
   assert.doesNotMatch(daily, /message\+=\$\(printf/);
@@ -990,7 +992,7 @@ runTest("daily workflow leaves delayed recovery to the watchdog", () => {
   assert.match(daily, /if: always\(\) && needs\.plan\.result == 'success' && needs\.plan\.outputs\.should_run == 'true'/);
 });
 
-runTest("daily workflow marks incomplete chunks and guards Pages publication", () => {
+runTest("daily workflow marks incomplete chunks and delegates profile-aware Pages publication", () => {
   const daily = fs.readFileSync(".github/workflows/rentcars-daily.yml", "utf8");
   const freshnessStep = daily.slice(
     daily.indexOf("      - name: Check report freshness"),
@@ -1006,15 +1008,15 @@ runTest("daily workflow marks incomplete chunks and guards Pages publication", (
   assert.match(daily, /cancel-in-progress: false/);
   assert.match(daily, /Check report freshness/);
   assert.match(daily, /report-meta\.json/);
+  assert.match(daily, /report_profile: process\.env\.REPORT_PROFILE/);
   assert.match(daily, /dailyNotification\.js/);
-  assert.match(freshnessStep, /echo "publish=false"/);
-  assert.match(freshnessStep, /current_http_status/);
-  assert.match(freshnessStep, /"\$current_http_status" == "404"/);
-  assert.match(freshnessStep, /rentcars-report-metadata-version/);
-  assert.match(freshnessStep, /pages_api_status/);
-  assert.match(freshnessStep, /WATCHDOG_OUTPUT=latest_primary_run_id/);
-  assert.match(freshnessStep, /latest_primary_id/);
-  assert.match(freshnessStep, /GITHUB_RUN_ID/);
+  assert.match(freshnessStep, /node src\/rentcars\/pagesSite\.js/);
+  assert.doesNotMatch(freshnessStep, /current_http_status|latest_primary_id|WATCHDOG_OUTPUT/);
+  assert.doesNotMatch(daily, /Prepare GitHub Pages site/);
+  assert.match(daily, /Ensure GitHub Pages is enabled/);
+  assert.match(daily, /actions\/upload-pages-artifact@v3/);
+  assert.match(daily, /actions\/deploy-pages@v4/);
+  assert.match(daily, /node src\/rentcars\/pagesSite\.js --verify/);
 });
 
 runTest("watchdog runs after the normal completion window and safely retries the complete workflow", () => {

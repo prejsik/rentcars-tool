@@ -124,7 +124,13 @@ The scheduled GitHub profiles share all settings except the pickup-date horizon:
 
 Manual GitHub runs can override locations, rolling days, durations, and speed mode from the `workflow_dispatch` form.
 Telegram notifications use the repository `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets.
-Both scheduled runs use these same secrets and publish to the same Pages HTML URL; the newer report replaces the older one. The 10:00 profile has 260 date/duration scenarios, 2340 airport checks, and seven chunks. GitHub may delay scheduled starts. Rerunning a scheduled attempt retains its original schedule profile; manual runs keep the 60-day default unless overridden.
+Both scheduled runs use the same Telegram secrets but publish separate reports:
+- Morning (01:17, 60 dates): https://prejsik.github.io/rentcars-tool/morning/report.html
+- Afternoon (10:00, 20 dates): https://prejsik.github.io/rentcars-tool/afternoon/report.html
+
+Each deployment preserves the other profile and compares freshness only within its own profile. Telegram links to the matching report after verifying its run and attempt. The site index links to both reports; the legacy `/report.html` remains an alias for the most recent report. A new profile becomes available after its first successful publication. If the other report cannot be read and verified, deployment is blocked rather than deleting it.
+
+The 10:00 profile has 260 date/duration scenarios, 2340 airport checks, and seven chunks. GitHub may delay scheduled starts. Rerunning a scheduled attempt retains its original schedule profile; manual runs keep the 60-day default unless overridden and publish in the morning slot.
 The 10:00 run is named `RentCars daytime run`. Completion-triggered recovery treats the daytime and night profiles separately, so a shorter report cannot replace recovery of the 60-day collection. Existing morning watchdog checkpoints check only the night profile; they do not detect a missing daytime trigger.
 
 Using CLI arguments:

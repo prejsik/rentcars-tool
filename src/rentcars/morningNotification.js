@@ -58,6 +58,7 @@ async function collectMorningMessage({ repository, defaultBranch, token, now = D
   const payload = await api(`actions/workflows/rentcars-daily.yml/runs?branch=${encodeURIComponent(defaultBranch)}&per_page=100`);
   const runs = (payload.workflow_runs || []).filter((run) =>
     isTrustedDailyRun(run, { repository, defaultBranch })
+    && String(run.display_title || "") !== "RentCars daytime run"
     && Number.isFinite(Date.parse(run.created_at)) && Date.parse(run.created_at) <= now
     && warsawDate(Date.parse(run.created_at)) === date
   ).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
@@ -93,7 +94,7 @@ async function collectMorningMessage({ repository, defaultBranch, token, now = D
     const site = await api("pages");
     const base = new URL(site.html_url);
     if (base.protocol !== "https:") throw new Error("Invalid Pages URL.");
-    const prefix = base.href.replace(/\/$/, "") + "/";
+    const prefix = `${base.href.replace(/\/$/, "")}/morning/`;
     const query = `?run=${selected.id}&attempt=${selected.run_attempt || 1}&checked=${now}`;
     // Public report requests deliberately have no GitHub credentials.
     const metadataResponse = await fetchImpl(`${prefix}report-meta.json${query}`, { signal: AbortSignal.timeout(10000) });

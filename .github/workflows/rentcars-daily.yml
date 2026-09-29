@@ -45,6 +45,7 @@ permissions:
   id-token: write
 
 env:
+  REPORT_PROFILE: ${{ github.event_name == 'schedule' && github.event.schedule == '0 10 * * *' && 'afternoon' || 'morning' }}
   SCHEDULE_ROLLING_DAYS: "60"
   SCHEDULE_DAYTIME_ROLLING_DAYS: "20"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"
@@ -396,6 +397,7 @@ jobs:
               run_id: process.env.RUN_ID,
               run_attempt: Number(process.env.RUN_ATTEMPT || 1),
               event: process.env.RUN_EVENT,
+              report_profile: process.env.REPORT_PROFILE,
               execution_started_at: data.execution_started_at || "",
               generated_at: data.generated_at || "",
               run_status: data.run_status || "",
@@ -473,106 +475,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          echo "publish=false" >> "$GITHUB_OUTPUT"
-          repository_name="${GITHUB_REPOSITORY#*/}"
-          current_meta_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${repository_name}/report-meta.json?run=${GITHUB_RUN_ID}"
-          if ! current_http_status=$(curl --silent --show-error --max-time 15 \
-            --output /tmp/current-report-meta.json \
-            --write-out "%{http_code}" \
-            "$current_meta_url"); then
-            echo "::warning::Could not verify the current Pages report. Publication is blocked for this run."
-            exit 0
-          fi
-
-          if [[ "$current_http_status" == "404" ]]; then
-            runs_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/actions/workflows/rentcars-daily.yml/runs?per_page=20"
-            if ! recent_runs_json=$(curl --fail --silent --show-error --max-time 20 \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$runs_url"); then
-              echo "::warning::Could not identify the newest primary RentCars run. Publication is blocked for this run."
-              exit 0
-            fi
-            if ! latest_primary_id=$(printf '%s' "$recent_runs_json" \
-              | WATCHDOG_OUTPUT=latest_primary_run_id node src/rentcars/watchdog.js); then
-              echo "::warning::Could not verify primary-run job evidence. Publication is blocked for this run."
-              exit 0
-            fi
-            if [[ "$latest_primary_id" != "$GITHUB_RUN_ID" ]]; then
-              echo "::warning::Run $GITHUB_RUN_ID is not the newest primary run ($latest_primary_id). Publication is blocked."
-              exit 0
-            fi
-
-            current_report_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${repository_name}/report.html?run=${GITHUB_RUN_ID}"
-            if ! current_report_status=$(curl --silent --show-error --max-time 30 \
-              --range 0-8191 \
-              --output /tmp/current-report-head.html \
-              --write-out "%{http_code}" \
-              "$current_report_url"); then
-              echo "::warning::Report metadata and HTML could not be verified. Publication is blocked for this run."
-              exit 0
-            fi
-
-            if [[ "$current_report_status" == "200" || "$current_report_status" == "206" ]]; then
-              if grep --quiet "rentcars-report-metadata-version" /tmp/current-report-head.html; then
-                echo "::warning::The current report expects metadata, but report-meta.json returned 404. Publication is blocked for this run."
-                exit 0
-              fi
-              echo "publish=true" >> "$GITHUB_OUTPUT"
-              echo "Legacy Pages report detected; this run may perform the one-time metadata migration."
-              exit 0
-            fi
-
-            if [[ "$current_report_status" != "404" ]]; then
-              echo "::warning::Current Pages HTML returned HTTP $current_report_status. Publication is blocked for this run."
-              exit 0
-            fi
-
-            pages_api_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/pages"
-            if ! pages_api_status=$(curl --silent --show-error --max-time 15 \
-              --output /tmp/pages-bootstrap-status.json \
-              --write-out "%{http_code}" \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$pages_api_url"); then
-              echo "::warning::Could not verify whether Pages exists. Publication is blocked for this run."
-              exit 0
-            fi
-            if [[ "$pages_api_status" == "404" ]]; then
-              echo "publish=true" >> "$GITHUB_OUTPUT"
-              echo "GitHub Pages is not configured yet; this first report may bootstrap it."
-            else
-              echo "::warning::Pages exists but neither metadata nor report HTML was available. Publication is blocked for this run."
-            fi
-            exit 0
-          fi
-          if [[ "$current_http_status" != "200" ]]; then
-            echo "::warning::Pages metadata returned HTTP $current_http_status. Publication is blocked for this run."
-            exit 0
-          fi
-
-          if ! freshness_decision=$(node -e '
-            const fs = require("fs");
-            const current = JSON.parse(fs.readFileSync("/tmp/current-report-meta.json", "utf8"));
-            const candidate = JSON.parse(fs.readFileSync("output/rentcars-report-meta.json", "utf8"));
-            const currentStarted = Date.parse(current.execution_started_at || "");
-            const candidateStarted = Date.parse(candidate.execution_started_at || "");
-            if (!Number.isFinite(currentStarted) || !Number.isFinite(candidateStarted)) {
-              throw new Error("Invalid report execution timestamp.");
-            }
-            process.stdout.write(currentStarted > candidateStarted ? "stale" : "publish");
-          '); then
-            echo "::warning::Pages metadata could not be compared. Publication is blocked for this run."
-            exit 0
-          fi
-
-          if [[ "$freshness_decision" == "publish" ]]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::A newer report is already published. This run will keep only its artifact."
-          fi
+          node src/rentcars/pagesSite.js
 
       - name: Ensure GitHub Pages is enabled
         id: pages-status
@@ -611,15 +514,6 @@ jobs:
             echo "::warning::GitHub Pages could not be enabled; HTTP $create_status."
           fi
 
-      - name: Prepare GitHub Pages site
-        if: steps.pages-status.outputs.enabled == 'true'
-        shell: bash
-        run: |
-          mkdir -p pages
-          cp output/rentcars-report.html pages/index.html
-          cp output/rentcars-report.html pages/report.html
-          cp output/rentcars-report-meta.json pages/report-meta.json
-
       - name: Configure GitHub Pages
         if: steps.pages-status.outputs.enabled == 'true'
         uses: actions/configure-pages@v5
@@ -637,6 +531,14 @@ jobs:
         uses: actions/deploy-pages@v4
         with:
           artifact_name: github-pages-attempt-${{ github.run_attempt }}
+
+      - name: Verify published report slots
+        if: steps.pages-deployment.outcome == 'success'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node src/rentcars/pagesSite.js --verify
 
   notify:
     name: Notify Telegram about RentCars.pl run
@@ -688,6 +590,7 @@ jobs:
           metadata_path="${RUNNER_TEMP}/rentcars-report-meta.json"
           html_path="${RUNNER_TEMP}/rentcars-current-report.html"
           pages_url=""
+          profile_url=""
           page_url=""
           if pages_status=$(curl --silent --show-error --max-time 10 \
             --output "$pages_info_path" \
@@ -710,12 +613,13 @@ jobs:
           fi
 
           if [[ -n "$pages_url" ]]; then
+            profile_url="${pages_url}${REPORT_PROFILE}/"
             for attempt in {1..8}; do
               rm -f "$metadata_path"
               if metadata_status=$(curl --silent --show-error --max-time 5 \
                 --output "$metadata_path" \
                 --write-out "%{http_code}" \
-                "${pages_url}report-meta.json?run=${GITHUB_RUN_ID}&run_attempt=${GITHUB_RUN_ATTEMPT}&check=${attempt}"); then
+                "${profile_url}report-meta.json?run=${GITHUB_RUN_ID}&run_attempt=${GITHUB_RUN_ATTEMPT}&check=${attempt}"); then
                 if [[ "$metadata_status" == "200" ]] \
                   && META_PATH="$metadata_path" EXPECTED_RUN_ID="$GITHUB_RUN_ID" EXPECTED_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" node -e '
                     const fs = require("fs");
@@ -727,10 +631,10 @@ jobs:
                   if html_status=$(curl --silent --show-error --max-time 5 \
                     --output "$html_path" \
                     --write-out "%{http_code}" \
-                    "${pages_url}report.html?run=${GITHUB_RUN_ID}&run_attempt=${GITHUB_RUN_ATTEMPT}&check=${attempt}"); then
+                    "${profile_url}report.html?run=${GITHUB_RUN_ID}&run_attempt=${GITHUB_RUN_ATTEMPT}&check=${attempt}"); then
                     if [[ "$html_status" == "200" ]] \
                       && grep --fixed-strings --quiet '<meta name="rentcars-report-metadata-version" content="1">' "$html_path"; then
-                      page_url="$pages_url"
+                      page_url="$profile_url"
                       break
                     fi
                   fi

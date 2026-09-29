@@ -82,7 +82,9 @@ test("verified current report is linked with completeness counts and no ETA", as
   const message = await helper().collectMorningMessage({ ...options, ...api });
   assert.match(message, /Raport kompletny/);
   assert.match(message, /9\/9/);
-  assert.match(message, /https:\/\/reports.example\/rentcars\/report.html/);
+  assert.match(message, /https:\/\/reports.example\/rentcars\/morning\/report.html/);
+  assert.ok(api.calls.some(({ url }) => new URL(url).pathname.endsWith("/morning/report-meta.json")));
+  assert.ok(api.calls.some(({ url }) => new URL(url).pathname.endsWith("/morning/report.html")));
   assert.doesNotMatch(message, /Szacowany czas/);
 });
 
@@ -98,8 +100,12 @@ test("failed partial report does not invent a completion time", async () => {
   assert.doesNotMatch(message, /Po zakonczeniu|Szacowany czas/);
 });
 
-test("no daily run today never reports an old or manual run as today's result", async () => {
-  const api = mockApi({ runs: [run(78, { event: "workflow_dispatch" }), run(77, { created_at: "2026-09-25T23:20:00Z" })] });
+test("no morning run today never reports a daytime, old or manual run as today's result", async () => {
+  const api = mockApi({ runs: [
+    run(79, { display_title: "RentCars daytime run" }),
+    run(78, { event: "workflow_dispatch" }),
+    run(77, { created_at: "2026-09-25T23:20:00Z" })
+  ] });
   assert.match(await helper().collectMorningMessage({ ...options, ...api }), /Brak dzisiejszego/);
   assert.equal(api.calls.length, 1);
 });

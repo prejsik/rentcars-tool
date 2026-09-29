@@ -47,10 +47,21 @@ test("daily notification is independent from Pages and has read-only permissions
 
   const notifyShell = notify.steps.map((step) => step.run || "").join("\n");
   const sendStep = notify.steps.find((step) => step.name === "Send Telegram notification");
+  const freshnessStep = daily.jobs.publish.steps.find((step) => step.name === "Check report freshness");
+  const verifyStep = daily.jobs.publish.steps.find((step) => step.name === "Verify published report slots");
   assert.match(notifyShell, /report-meta\.json/);
   assert.match(notifyShell, /report\.html/);
+  assert.match(sendStep.run, /profile_url="\$\{pages_url\}\$\{REPORT_PROFILE\}\/"/);
+  assert.match(sendStep.run, /\$\{profile_url\}report-meta\.json/);
+  assert.match(sendStep.run, /\$\{profile_url\}report\.html/);
   assert.equal(sendStep.env.GITHUB_TOKEN, "${{ github.token }}");
   assert.match(sendStep.run, /Authorization: Bearer \$\{GITHUB_TOKEN\}/);
+  assert.equal(freshnessStep.env.GITHUB_TOKEN, "${{ github.token }}");
+  assert.equal(freshnessStep.run.trim(), "node src/rentcars/pagesSite.js");
+  assert.equal(verifyStep.if, "steps.pages-deployment.outcome == 'success'");
+  assert.equal(verifyStep.env.GITHUB_TOKEN, "${{ github.token }}");
+  assert.equal(verifyStep.run.trim(), "node src/rentcars/pagesSite.js --verify");
+  assert.equal(daily.jobs.publish.steps.some((step) => step.name === "Prepare GitHub Pages site"), false);
   assert.equal(daily.jobs.merge.environment, undefined);
   assert.equal(daily.jobs.publish.environment.name, "github-pages");
   assert.equal([].concat(daily.jobs.publish.needs).includes("notify"), false);
@@ -65,7 +76,8 @@ test("daily notification sends one verified report link or one bounded link-free
 
   assert.ok(sendStep, "daily notification must have a send step");
 
-  function execute({ withBody, pagesSiteAvailable = true, metadataAttempt = "2", htmlStatus = "200", htmlMarker = true }) {
+  function execute({ withBody, pagesSiteAvailable = true, metadataAttempt = "2", htmlStatus = "200", htmlMarker = true,
+    reportProfile = "afternoon" }) {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "rentcars-notify-shell-"));
     const inputDir = path.join(tempDir, "notification-input");
     const capturePath = path.join(tempDir, "telegram-message.txt");
@@ -144,6 +156,7 @@ test("daily notification sends one verified report link or one bounded link-free
           GITHUB_API_URL: "https://api.github.test",
           GITHUB_REPOSITORY: "mmcars/rentcars",
           GITHUB_REPOSITORY_OWNER: "mmcars",
+          REPORT_PROFILE: reportProfile,
           PLAN_RESULT: "success",
           SCRAPE_RESULT: "success",
           MERGE_RESULT: "success"
@@ -158,12 +171,16 @@ test("daily notification sends one verified report link or one bounded link-free
 
   const successMessage = execute({ withBody: true });
   assert.equal((successMessage.match(/RentCars\.pl: run finished/g) || []).length, 1);
-  assert.match(successMessage, /Current HTML report:\nhttps:\/\/reports\.example\.test\/rentcars\/report\.html\n\nArtifact backup:/);
+  assert.match(successMessage, /Current HTML report:\nhttps:\/\/reports\.example\.test\/rentcars\/afternoon\/report\.html\n\nArtifact backup:/);
+
+  const morningSuccessMessage = execute({ withBody: true, reportProfile: "morning" });
+  assert.equal((morningSuccessMessage.match(/RentCars\.pl: run finished/g) || []).length, 1);
+  assert.match(morningSuccessMessage, /Current HTML report:\nhttps:\/\/reports\.example\.test\/rentcars\/morning\/report\.html\n\nArtifact backup:/);
 
   const noJsonMessage = execute({ withBody: false });
   assert.equal((noJsonMessage.match(/RentCars\.pl: run finished/g) || []).length, 1);
   assert.match(noJsonMessage, /details unavailable; plan=success, scrape=success, merge=success/);
-  assert.match(noJsonMessage, /Current HTML report:\nhttps:\/\/reports\.example\.test\/rentcars\/report\.html\n\nArtifact backup:/);
+  assert.match(noJsonMessage, /Current HTML report:\nhttps:\/\/reports\.example\.test\/rentcars\/afternoon\/report\.html\n\nArtifact backup:/);
 
   const pagesFailureMessage = execute({ withBody: true, pagesSiteAvailable: false });
   assert.equal((pagesFailureMessage.match(/RentCars\.pl: run finished/g) || []).length, 1);
@@ -199,6 +216,7 @@ test("10:00 Warsaw schedule adds 20 dates without changing the night profile or 
     { cron: "0 10 * * *", timezone: "Europe/Warsaw" }
   ]);
   assert.equal(daily.env.SCHEDULE_DAYTIME_ROLLING_DAYS, "20");
+  assert.equal(daily.env.REPORT_PROFILE, "${{ github.event_name == 'schedule' && github.event.schedule == '0 10 * * *' && 'afternoon' || 'morning' }}");
   assert.equal(daily["run-name"], "${{ github.event_name == 'schedule' && github.event.schedule == '0 10 * * *' && 'RentCars daytime run' || inputs.watchdog_recovery == 'true' && 'RentCars watchdog recovery' || 'RentCars daily run' }}");
   const send = daily.jobs.notify.steps.find(step => step.name === "Send Telegram notification");
   assert.equal(send.env.TELEGRAM_BOT_TOKEN, "${{ secrets.TELEGRAM_BOT_TOKEN }}");
