@@ -69,6 +69,14 @@ test("daily notification is independent from Pages and has read-only permissions
   assert.match(String(daily.jobs.publish.outputs.published), /pages-deployment\.outcome == 'success'/);
 });
 
+test("cancelling a daily run blocks merging and publishing its partial report", () => {
+  const daily = workflow(".github/workflows/rentcars-daily.yml");
+  for (const name of ["merge", "publish"]) {
+    assert.match(daily.jobs[name].if, /!cancelled\(\)/);
+    assert.match(daily.jobs[name].if, /always\(\)/);
+  }
+});
+
 test("daily notification sends one verified report link or one bounded link-free fallback", () => {
   const daily = workflow(".github/workflows/rentcars-daily.yml");
   const sendStep = daily.jobs.notify.steps.find((step) => step.name === "Send Telegram notification");

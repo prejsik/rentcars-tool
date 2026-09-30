@@ -989,7 +989,7 @@ runTest("daily workflow leaves delayed recovery to the watchdog", () => {
   assert.match(daily, /^  notify:$/m);
   assert.match(daily, /if: always\(\) && \(needs\.plan\.result != 'success'/);
   assert.match(daily, /details unavailable; plan=%s, scrape=%s, merge=%s/);
-  assert.match(daily, /if: always\(\) && needs\.plan\.result == 'success' && needs\.plan\.outputs\.should_run == 'true'/);
+  assert.match(daily, /if: always\(\) && !cancelled\(\) && needs\.plan\.result == 'success' && needs\.plan\.outputs\.should_run == 'true'/);
 });
 
 runTest("daily workflow marks incomplete chunks and delegates profile-aware Pages publication", () => {
@@ -1034,7 +1034,7 @@ runTest("watchdog runs after the normal completion window and safely retries the
   assert.match(watchdogScript, /jobs_url/);
   assert.match(watchdog, /actions\/runs\/\$\{TARGET_RUN_ID\}\/rerun"/);
   assert.doesNotMatch(watchdog, /rerun-failed-jobs/);
-  assert.match(watchdog, /actions\/workflows\/rentcars-daily\.yml\/dispatches/);
+  assert.doesNotMatch(watchdog, /\/dispatches/);
   assert.match(watchdog, /if: always\(\) && steps\.gate\.outputs\.should_run == 'true'/);
   assert.match(watchdog, /TELEGRAM_BOT_TOKEN/);
 });
@@ -1083,11 +1083,11 @@ runTest("watchdog monitors a primary run that is still active", () => {
   assert.deepEqual(decision, { action: "monitor", runId: 301, runAttempt: 1 });
 });
 
-runTest("watchdog dispatches a replacement when no recent primary run exists", () => {
+runTest("watchdog warns without starting a replacement when no recent primary run exists", () => {
   const { classifyDailyRuns } = require("../src/rentcars/watchdog");
   const decision = classifyDailyRuns([], { now: "2026-08-21T04:30:00.000Z" });
 
-  assert.deepEqual(decision, { action: "dispatch", runId: null, runAttempt: 0 });
+  assert.deepEqual(decision, { action: "missing", runId: null, runAttempt: 0 });
 });
 
 runTest("watchdog recognizes its active replacement workflow", () => {
@@ -1146,6 +1146,7 @@ runAsyncTest("watchdog enriches daily runs with scrape job evidence", async () =
     fetchImpl: async () => ({
       ok: true,
       json: async () => ({
+        total_count: 2,
         jobs: [
           { name: "Plan RentCars.pl matrix", conclusion: "success" },
           { name: "Scrape chunk 001", conclusion: "success" }
@@ -1183,7 +1184,7 @@ runAsyncTest("watchdog inspects all runs but blocks recovery when newer job evid
       ? { ok: false, status: 500 }
       : {
         ok: true,
-        json: async () => ({ jobs: [{ name: "Scrape chunk 001", conclusion: "failure" }] })
+        json: async () => ({ jobs: [{ name: "Scrape chunk 001", conclusion: "failure" }], total_count: 1 })
       }
   });
 

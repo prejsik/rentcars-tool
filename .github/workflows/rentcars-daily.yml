@@ -327,7 +327,7 @@ jobs:
     needs:
       - plan
       - scrape
-    if: always() && needs.plan.result == 'success' && needs.plan.outputs.should_run == 'true'
+    if: always() && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
@@ -445,7 +445,7 @@ jobs:
   publish:
     name: Publish RentCars.pl report
     needs: merge
-    if: always() && needs.merge.result == 'success'
+    if: always() && !cancelled() && needs.merge.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:

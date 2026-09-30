@@ -15,6 +15,7 @@ const MERGE_JOB_NAMES = new Set([
   "Merge and publish RentCars.pl report"
 ]);
 const DAYTIME_RUN_TITLE = "RentCars daytime run";
+const WARSAW_DATE = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Warsaw" });
 
 function timestamp(value) {
   const parsed = Date.parse(value);
@@ -40,9 +41,10 @@ async function includeTriggeredRun(runs, options = {}) {
   }
 
   const runId = Number(env.WATCHDOG_TRIGGER_RUN_ID);
-  if (!runId || availableRuns.some((run) => Number(run?.id) === runId)) {
+  if (!runId) {
     return availableRuns;
   }
+  const otherRuns = availableRuns.filter((run) => Number(run?.id) !== runId);
 
   const repository = String(env.WATCHDOG_REPOSITORY || "");
   const defaultBranch = String(env.WATCHDOG_DEFAULT_BRANCH || "");
@@ -83,12 +85,12 @@ async function includeTriggeredRun(runs, options = {}) {
     if (Number(exactRun?.id) !== runId || !isTrustedDailyRun(exactRun, { repository, defaultBranch })) {
       throw new Error("The exact run response did not match the trusted triggered run.");
     }
-    return [...availableRuns, {
+    return [...otherRuns, {
       ...exactRun,
       jobs_url: `${runUrl}/jobs`
     }];
   } catch (error) {
-    return [...availableRuns, {
+    return [...otherRuns, {
       ...eventRun,
       has_scrape_jobs: null,
       core_jobs_succeeded: null,
@@ -182,6 +184,11 @@ function relevantInspectionFailure(runs, referenceRun) {
     .sort((left, right) => (timestamp(right.created_at) || 0) - (timestamp(left.created_at) || 0))[0];
 }
 
+function newerCancellation(runs, referenceRun) {
+  return runs.find((run) => run?.conclusion === "cancelled"
+    && (timestamp(run.created_at) || 0) >= (timestamp(referenceRun.created_at) || 0));
+}
+
 function decideCompletedRunRecovery(triggeredRun, runs, options = {}) {
   if (!isTrustedDailyRun(triggeredRun, options) || triggeredRun?.status !== "completed") {
     return emptyDecision();
@@ -194,6 +201,9 @@ function decideCompletedRunRecovery(triggeredRun, runs, options = {}) {
     .filter((run) => Number(run?.id) === Number(triggeredRun.id))
     .sort((left, right) => (Number(right?.run_attempt) || 1) - (Number(left?.run_attempt) || 1))[0]
     || triggeredRun;
+  if (currentRun.conclusion === "cancelled") {
+    return emptyDecision();
+  }
   const activeRun = trustedRuns
     .filter((run) => ACTIVE_STATUSES.has(run?.status))
     .sort((left, right) => (timestamp(right.created_at) || 0) - (timestamp(left.created_at) || 0))[0];
@@ -204,7 +214,8 @@ function decideCompletedRunRecovery(triggeredRun, runs, options = {}) {
 
   const runId = Number(currentRun.id);
   const runAttempt = Number(currentRun.run_attempt) || 1;
-  if (currentRun.status !== "completed" || currentRun.conclusion === "success") {
+  if (currentRun.status !== "completed" || NON_FAILURE_CONCLUSIONS.has(currentRun.conclusion)
+    || newerCancellation(trustedRuns, currentRun)) {
     return emptyDecision();
   }
 
@@ -267,7 +278,12 @@ async function enrichRunJobEvidence(runs, options = {}) {
         throw new Error(`Could not inspect jobs for run ${run.id}: HTTP ${response.status || "unknown"}.`);
       }
       const payload = await response.json();
-      const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
+      if (!Array.isArray(payload?.jobs) || !Number.isInteger(payload.total_count)
+        || payload.total_count !== payload.jobs.length
+        || (run.status === "completed" && payload.jobs.length === 0)) {
+        throw new Error(`Incomplete jobs response for run ${run.id}.`);
+      }
+      const jobs = payload.jobs;
       return {
         ...run,
         ...summarizeJobEvidence(jobs)
@@ -305,14 +321,16 @@ function selectNewestPrimaryRun(runs) {
 
 function classifyDailyRuns(runs, options = {}) {
   const now = timestamp(options.now) ?? Date.now();
-  const maxAgeMs = Number(options.maxAgeMs) || 12 * 60 * 60 * 1000;
+  const maxAgeMs = Number(options.maxAgeMs) || null;
   const recentRuns = (Array.isArray(runs) ? runs : [])
     .filter((run) => run?.event === "schedule" || isWatchdogRecovery(run))
     .filter((run) => recoveryProfile(run) === "night")
     .filter((run) => !options.repository || isTrustedDailyRun(run, options))
     .filter((run) => {
       const createdAt = timestamp(run?.created_at);
-      return createdAt != null && now >= createdAt && now - createdAt <= maxAgeMs;
+      return createdAt != null && now >= createdAt && (maxAgeMs
+        ? now - createdAt <= maxAgeMs
+        : WARSAW_DATE.format(createdAt) === WARSAW_DATE.format(now));
     });
   const candidates = recentRuns
     .filter((run) => {
@@ -345,7 +363,7 @@ function classifyDailyRuns(runs, options = {}) {
         runAttempt: Number(inspectionFailure.run_attempt) || 1
       };
     }
-    return { action: "dispatch", runId: null, runAttempt: 0 };
+    return { action: "missing", runId: null, runAttempt: 0 };
   }
 
   const runId = Number(primaryRun.id);
@@ -353,11 +371,14 @@ function classifyDailyRuns(runs, options = {}) {
   if (ACTIVE_STATUSES.has(primaryRun.status)) {
     return { action: "monitor", runId, runAttempt };
   }
+  if (primaryRun.conclusion === "cancelled" || newerCancellation(recentRuns, primaryRun)) {
+    return { action: "none", runId, runAttempt };
+  }
   const inspectionFailure = relevantInspectionFailure(recentRuns, primaryRun);
   if (inspectionFailure) {
     return decisionForRun("inspection_failed", inspectionFailure);
   }
-  if (primaryRun.status === "completed" && primaryRun.conclusion === "success") {
+  if (primaryRun.status === "completed" && NON_FAILURE_CONCLUSIONS.has(primaryRun.conclusion)) {
     return { action: "none", runId, runAttempt };
   }
   if (primaryRun.reporting_only_failure === true) {
@@ -371,9 +392,19 @@ function classifyDailyRuns(runs, options = {}) {
 
 async function main() {
   const input = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
-  const runs = await includeTriggeredRun(
-    Array.isArray(input) ? input : input.workflow_runs
-  );
+  if (!Array.isArray(input) && (!Array.isArray(input.workflow_runs)
+    || !Number.isInteger(input.total_count) || input.total_count !== input.workflow_runs.length)) {
+    throw new Error("Incomplete workflow runs response; automatic recovery is blocked.");
+  }
+  const listedRuns = Array.isArray(input) ? input : input.workflow_runs;
+  const since = timestamp(process.env.WATCHDOG_SINCE);
+  if (since != null && listedRuns.some((run) => timestamp(run.created_at) == null || timestamp(run.created_at) < since)) {
+    throw new Error("Workflow runs response is outside the requested date window; automatic recovery is blocked.");
+  }
+  console.error(`Watchdog evidence: ${JSON.stringify({ since: process.env.WATCHDOG_SINCE || null,
+    runs: listedRuns.map(({ id, run_attempt, created_at, status, conclusion }) =>
+      ({ id, run_attempt, created_at, status, conclusion })) })}`);
+  const runs = await includeTriggeredRun(listedRuns);
   const enrichedRuns = await enrichRunJobEvidence(runs);
   for (const run of enrichedRuns.filter((entry) => entry?.job_evidence_error)) {
     console.error(`Watchdog warning for run ${run.id}: ${run.job_evidence_error}`);
@@ -394,14 +425,12 @@ async function main() {
   if (process.env.WATCHDOG_MODE === "workflow_run") {
     const triggeredRunId = Number(process.env.WATCHDOG_TRIGGER_RUN_ID);
     const apiRun = enrichedRuns.find((run) => Number(run?.id) === triggeredRunId);
-    const triggeredRun = {
-      ...(apiRun || {
-        has_scrape_jobs: null,
-        core_jobs_succeeded: null,
-        reporting_jobs_failed: null,
-        reporting_only_failure: null,
-        job_evidence_error: `Triggered run ${triggeredRunId || "unknown"} was not returned by the runs API.`
-      }),
+    const triggeredRun = apiRun || {
+      has_scrape_jobs: null,
+      core_jobs_succeeded: null,
+      reporting_jobs_failed: null,
+      reporting_only_failure: null,
+      job_evidence_error: `Triggered run ${triggeredRunId || "unknown"} was not returned by the runs API.`,
       id: triggeredRunId,
       event: process.env.WATCHDOG_TRIGGER_EVENT,
       status: process.env.WATCHDOG_TRIGGER_STATUS,

@@ -51,7 +51,7 @@ async function enrich(run, jobs) {
     token: "test-token",
     fetchImpl: async () => ({
       ok: true,
-      json: async () => ({ jobs })
+      json: async () => ({ jobs, total_count: jobs.length })
     })
   });
   return result;
@@ -273,7 +273,7 @@ test("missing workflow_run metadata is read exactly before inspecting active att
       json: async () => ({ jobs: [
         { name: "Plan RentCars.pl matrix", conclusion: "success" },
         { name: "Scrape chunk 001", conclusion: null }
-      ] })
+      ], total_count: 2 })
     };
   };
   const runs = await includeTriggeredRun([], {
@@ -332,7 +332,7 @@ test("missing completed run recovers failed collection but does not rerun report
   ]) {
     const fetchImpl = async (url) => ({
       ok: true,
-      json: async () => new URL(url).pathname.endsWith("/jobs") ? { jobs } : trustedRun()
+      json: async () => new URL(url).pathname.endsWith("/jobs") ? { jobs, total_count: jobs.length } : trustedRun()
     });
     const runs = await includeTriggeredRun([], { env: workflowRunEnv, token: "test-token", fetchImpl });
     const enriched = await enrichRunJobEvidence(runs, { token: "test-token", fetchImpl });
@@ -352,7 +352,81 @@ test("a newer successful replacement suppresses late alerts and retries for an e
   });
 });
 
-test("workflow inspection bypasses a cached run list and sees the completed replacement", () => {
+test("an empty or stale run list reports missing evidence without starting a replacement", () => {
+  const options = { ...trustOptions, now: "2026-09-30T12:53:47Z" };
+  const stale = trustedRun({ created_at: "2026-09-22T05:03:57Z", has_scrape_jobs: true });
+  for (const runs of [[], [stale]]) {
+    assert.deepEqual(classifyDailyRuns(runs, options), {
+      action: "missing", runId: null, runAttempt: 0
+    });
+  }
+});
+
+test("cancellation is respected by both completion events and scheduled checks", () => {
+  const cancelled = trustedRun({ conclusion: "cancelled", has_scrape_jobs: true });
+  assert.equal(decideCompletedRunRecovery(cancelled, [cancelled], trustOptions).action, "none");
+  assert.equal(scheduledDecision([cancelled]).action, "none");
+});
+
+test("a cancelled replacement prevents restarting an older failed run", () => {
+  const failed = trustedRun({ has_scrape_jobs: true });
+  const cancelled = trustedRun({ id: 902, event: "workflow_dispatch",
+    display_title: "RentCars watchdog recovery", conclusion: "cancelled",
+    created_at: "2026-09-27T01:00:00Z", has_scrape_jobs: false });
+  assert.equal(scheduledDecision([failed, cancelled]).action, "none");
+  assert.equal(decideCompletedRunRecovery(failed, [failed, cancelled], trustOptions).action, "none");
+});
+
+test("a delayed checkpoint recognizes today's complete report even after twelve hours", () => {
+  const completed = trustedRun({ id: 36658415572, conclusion: "success",
+    created_at: "2026-09-30T02:08:06Z", has_scrape_jobs: true });
+  assert.deepEqual(classifyDailyRuns([completed], {
+    ...trustOptions, now: "2026-09-30T15:00:00Z"
+  }), { action: "none", runId: 36658415572, runAttempt: 1 });
+});
+
+test("incomplete job payloads cannot be used to decide on a retry", async () => {
+  for (const payload of [{}, { jobs: [], total_count: 5 }, { jobs: [], total_count: 0 }]) {
+    const [run] = await enrichRunJobEvidence([trustedRun()], {
+      token: "test-token", fetchImpl: async () => ({ ok: true, json: async () => payload })
+    });
+    assert.ok(run.job_evidence_error);
+    assert.equal(scheduledDecision([run]).action, "inspection_failed");
+  }
+});
+
+test("completion events re-read exact current state even when a stale attempt is listed", async () => {
+  const stale = trustedRun({ has_scrape_jobs: true });
+  let requests = 0;
+  const runs = await includeTriggeredRun([stale], {
+    env: workflowRunEnv, token: "test-token",
+    fetchImpl: async () => {
+      requests++;
+      return { ok: true, json: async () => trustedRun({ run_attempt: 2, conclusion: "cancelled" }) };
+    }
+  });
+  assert.equal(requests, 1);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].conclusion, "cancelled");
+  assert.equal(decideCompletedRunRecovery(stale, runs, trustOptions).action, "none");
+});
+
+test("CLI rejects stale, malformed or truncated list evidence instead of deciding on recovery", () => {
+  for (const payload of [
+    {}, { workflow_runs: [], total_count: 101 },
+    { workflow_runs: [trustedRun()], total_count: 1 }
+  ]) {
+    const result = spawnSync(process.execPath, ["src/rentcars/watchdog.js"], {
+      cwd: ROOT, encoding: "utf8", input: JSON.stringify(payload),
+      env: { ...process.env, WATCHDOG_SINCE: "2026-09-30", WATCHDOG_MODE: "schedule" }
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /automatic recovery is blocked/);
+  }
+});
+
+test("workflow inspection uses a supported date filter instead of relying on an ignored nonce", () => {
   const workflow = yaml.parse(fs.readFileSync(path.join(ROOT, ".github/workflows/rentcars-watchdog.yml"), "utf8"));
   const step = workflow.jobs.watchdog.steps.find((item) => item.name === "Inspect recent RentCars daily runs");
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "rentcars-watchdog-cache-"));
@@ -362,27 +436,36 @@ test("workflow inspection bypasses a cached run list and sees the completed repl
   const fixturePath = path.join(directory, "bash-env.sh");
   const outputPath = path.join(directory, "outputs.txt");
   fs.writeFileSync(fixturePath, [
+    "date() { if [[ \"$*\" == *%Y-%m-%d* ]]; then printf '%s' '2026-09-25'; else command date \"$@\"; fi; }",
+    "export -f date",
     "curl() {",
     "  local argument",
     "  for argument in \"$@\"; do",
-    "    if [[ \"$argument\" == https://*inspection=* ]]; then printf '%s' \"$FRESH_RUNS\"; return 0; fi",
+    "    if [[ \"$argument\" == https://*created=%3E%3D* ]]; then printf '%s' \"$FRESH_RUNS\"; return 0; fi",
     "  done",
     "  printf '%s' \"$CACHED_RUNS\"",
     "}", "export -f curl"
   ].join("\n"));
   try {
-    const result = spawnSync(process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash",
+    for (const [payload, expectedAction] of [
+      [{ workflow_runs: [replacement, old], total_count: 2 }, "none"],
+      [{ workflow_runs: [], total_count: 101 }, "inspection_failed"]
+    ]) {
+      const result = spawnSync(process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash",
       ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step.run], {
         cwd: ROOT, encoding: "utf8", env: { ...process.env, ...workflowRunEnv,
           BASH_ENV: fixturePath.replaceAll("\\", "/"), GITHUB_OUTPUT: outputPath.replaceAll("\\", "/"),
           GITHUB_TOKEN: "test-token", GITHUB_REPOSITORY: "mmcars/rentcars", GITHUB_RUN_ID: "901", GITHUB_RUN_ATTEMPT: "1",
-          DEFAULT_BRANCH: "main", WATCHDOG_TRIGGER_ATTEMPT: "3",
-          CACHED_RUNS: JSON.stringify({ workflow_runs: [old] }),
-          FRESH_RUNS: JSON.stringify({ workflow_runs: [replacement, old] }) }
+          DEFAULT_BRANCH: "main", WATCHDOG_MODE: "schedule", WATCHDOG_NOW: "2026-09-27T18:00:00Z",
+          CACHED_RUNS: JSON.stringify({ workflow_runs: [old], total_count: 1 }),
+          FRESH_RUNS: JSON.stringify(payload) }
       });
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(fs.readFileSync(outputPath, "utf8"), /action=none/);
-    assert.doesNotMatch(fs.readFileSync(outputPath, "utf8"), /exhausted|rerun/);
+      assert.equal(result.status, 0, result.stderr);
+      const output = fs.readFileSync(outputPath, "utf8");
+      assert.ok(output.includes(`action=${expectedAction}`), output);
+      assert.doesNotMatch(output, /exhausted|rerun|dispatch/);
+      fs.unlinkSync(outputPath);
+    }
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -395,4 +478,37 @@ test("watchdog reports reporting-only failure without dispatching or rerunning",
   const branch = workflow.slice(start, end);
   assert.match(branch, /No collection rerun was started/i);
   assert.doesNotMatch(branch, /\/rerun|\/dispatches/);
+});
+
+test("retry rechecks current status and attempt immediately before the POST", () => {
+  const workflow = yaml.parse(fs.readFileSync(path.join(ROOT, ".github/workflows/rentcars-watchdog.yml"), "utf8"));
+  const step = workflow.jobs.watchdog.steps.find((item) => item.name === "Recover or report RentCars daily status");
+  for (const [changes, expectedPosts] of [
+    [{ conclusion: "cancelled" }, 0], [{ conclusion: "success" }, 0],
+    [{ run_attempt: 2 }, 0], [{ status: "in_progress", conclusion: null }, 0], [{}, 1]
+  ]) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "rentcars-watchdog-retry-"));
+    const fixturePath = path.join(directory, "bash-env.sh");
+    const capturePath = path.join(directory, "requests.txt");
+    fs.writeFileSync(fixturePath, [
+      "curl() {",
+      "  if [[ \"$*\" == *'--request POST'* ]]; then printf 'POST\\n' >> \"$CAPTURE\"; else printf '%s' \"$CURRENT_RUN\"; fi",
+      "}", "export -f curl"
+    ].join("\n"));
+    try {
+      const result = spawnSync(process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash",
+        ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step.run], {
+          cwd: ROOT, encoding: "utf8", env: { ...process.env,
+            BASH_ENV: fixturePath.replaceAll("\\", "/"), CAPTURE: capturePath.replaceAll("\\", "/"),
+            ACTION: "rerun", TARGET_RUN_ID: "801", TARGET_RUN_ATTEMPT: "1",
+            DEFAULT_BRANCH: "main", GITHUB_TOKEN: "test-token", GITHUB_REPOSITORY: "mmcars/rentcars",
+            GITHUB_SERVER_URL: "https://github.test", GITHUB_RUN_ID: "901",
+            TELEGRAM_BOT_TOKEN: "", TELEGRAM_CHAT_ID: "",
+            CURRENT_RUN: JSON.stringify(trustedRun(changes)) }
+        });
+      assert.equal(result.status, 0, result.stderr);
+      const posts = fs.existsSync(capturePath) ? fs.readFileSync(capturePath, "utf8").trim().split("\n").length : 0;
+      assert.equal(posts, expectedPosts, JSON.stringify(changes));
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  }
 });
