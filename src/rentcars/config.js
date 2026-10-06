@@ -487,7 +487,7 @@ function loadConfig(argv) {
       10
     ),
     maxAdditionalResultPages: parsePositiveIntegerInput(
-      configValue(cli, fileConfig, ["maxAdditionalResultPages", "max-additional-result-pages"], "1"),
+      configValue(cli, fileConfig, ["maxAdditionalResultPages", "max-additional-result-pages"], "10"),
       "maxAdditionalResultPages"
     ),
     timeoutMs: Number.parseInt(configValue(cli, fileConfig, ["timeoutMs", "timeout-ms"], "45000"), 10),

@@ -97,11 +97,12 @@ test("a navigation timeout retries only the failed airport within the same scena
       return { ok: false, error: new Error("page.goto: Timeout 30000ms exceeded.") };
     }
     const offer = { provider: "Test provider", totalPrice: 100, currency: "PLN" };
-    return { ok: true, results: [offer], cheapest: offer, mmCoverageComplete: true };
+    return { ok: true, results: [offer], cheapest: offer, mmCoverageComplete: true, rankingCoverageComplete: true };
   };
   const result = await scraper.run();
   assert.deepEqual(calls, { Krakow: 2, Katowice: 1 });
   assert.equal(result.successfulCheckCount, 2);
   assert.deepEqual(result.failures, []);
   assert.ok(result.expectedTargets.every((target) => target.mmCoverageComplete));
+  assert.ok(result.expectedTargets.every((target) => target.rankingCoverageComplete));
 });

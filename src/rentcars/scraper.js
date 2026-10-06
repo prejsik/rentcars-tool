@@ -187,7 +187,9 @@ class RentCarsScraper {
         sortLabel: target.sortLabel,
         priceMode: target.priceMode,
         mmCoverageComplete: outcomes[index]?.ok === true
-          && outcomes[index]?.mmCoverageComplete === true
+          && outcomes[index]?.mmCoverageComplete === true,
+        rankingCoverageComplete: outcomes[index]?.ok === true
+          && outcomes[index]?.rankingCoverageComplete === true
       })),
       successfulCheckCount: outcomes.filter((outcome) => outcome?.ok).length,
       failedCheckCount: failures.length
@@ -304,7 +306,7 @@ class RentCarsScraper {
 
       const directSearch = await this.tryDirectSearchFlow(page, target, responseCollector);
       let offers = directSearch.offers;
-      let mmCoverageComplete = directSearch.mmCoverageComplete;
+      let coverage = directSearch;
 
       if (!offers.length) {
         if (!homepagePrepared) {
@@ -327,7 +329,7 @@ class RentCarsScraper {
         await this.waitForCollectorOffers(responseCollector, this.collectorWaitTimeoutMs());
 
         const pageOffers = await this.collectOffersFromCurrentPage(page, target);
-        mmCoverageComplete = await this.loadAdditionalResultPages(page, target, responseCollector, pageOffers);
+        coverage = await this.loadAdditionalResultPages(page, target, responseCollector, pageOffers);
         offers = dedupeOffers([
           ...responseCollector.getOffers(),
           ...pageOffers
@@ -359,7 +361,8 @@ class RentCarsScraper {
       return {
         ok: true,
         cheapest,
-        mmCoverageComplete,
+        mmCoverageComplete: coverage.mmCoverageComplete,
+        rankingCoverageComplete: coverage.rankingCoverageComplete,
         results: locationOffers.map((offer) => ({
           ...offer,
           requestedLocation: target.requestedLocation,
@@ -428,7 +431,7 @@ class RentCarsScraper {
   async tryDirectSearchFlow(page, location, collector) {
     const target = makeLocationTarget(location);
     if (!/rentcars\.pl/i.test(this.config.baseUrl) || !target.value) {
-      return { offers: [], mmCoverageComplete: false };
+      return { offers: [], mmCoverageComplete: false, rankingCoverageComplete: false };
     }
 
     const origin = new URL(this.config.baseUrl).origin;
@@ -439,7 +442,7 @@ class RentCarsScraper {
       .catch(() => false);
 
     if (!loaded || !(await this.looksLikeSearchPage(page))) {
-      return { offers: [], mmCoverageComplete: false };
+      return { offers: [], mmCoverageComplete: false, rankingCoverageComplete: false };
     }
 
     await this.waitForResults(page);
@@ -452,13 +455,13 @@ class RentCarsScraper {
     await this.waitForCollectorOffers(collector, this.collectorWaitTimeoutMs());
 
     const pageOffers = await this.collectOffersFromCurrentPage(page, target);
-    const mmCoverageComplete = await this.loadAdditionalResultPages(page, target, collector, pageOffers);
+    const coverage = await this.loadAdditionalResultPages(page, target, collector, pageOffers);
     return {
       offers: dedupeOffers([
         ...collector.getOffers(),
         ...pageOffers
       ]),
-      mmCoverageComplete
+      ...coverage
     };
   }
 
@@ -1351,23 +1354,29 @@ class RentCarsScraper {
   }
 
   async loadAdditionalResultPages(page, targetInput, collector, accumulatedOffers) {
-    const maxAdditionalPages = clampPositiveInteger(this.config.maxAdditionalResultPages, 1, 0, 3);
+    const maxAdditionalPages = clampPositiveInteger(this.config.maxAdditionalResultPages, 10, 0, 10);
     const target = makeLocationTarget(targetInput);
     const seenUrls = new Set([page.url()]);
-
-    for (let pageIndex = 0; pageIndex < maxAdditionalPages; pageIndex += 1) {
+    const coverage = (exhausted = false) => {
       const combinedOffers = dedupeOffers([
         ...collector.getOffers(),
         ...accumulatedOffers
       ]);
-      const mmCoverageFound = hasMmCarsOfferForConfiguredViews(combinedOffers, this.config.transmission);
-      if (mmCoverageFound && hasTopThreeCoverage(combinedOffers, this.config.transmission)) {
-        return true;
+      return {
+        mmCoverageComplete: exhausted || hasMmCarsOfferForConfiguredViews(combinedOffers, this.config.transmission),
+        rankingCoverageComplete: exhausted || hasTopThreeCoverage(combinedOffers, this.config.transmission)
+      };
+    };
+
+    for (let pageIndex = 0; pageIndex < maxAdditionalPages; pageIndex += 1) {
+      const current = coverage();
+      if (current.mmCoverageComplete && current.rankingCoverageComplete) {
+        return current;
       }
 
       const control = await this.findLoadMoreControl(page);
       if (!control) {
-        return true;
+        return coverage(true);
       }
 
       const beforeUrl = page.url();
@@ -1391,7 +1400,7 @@ class RentCarsScraper {
       if (!loaded && href) {
         const nextUrl = resolveUrl(href, beforeUrl);
         if (!nextUrl || seenUrls.has(nextUrl)) {
-          return mmCoverageFound;
+          return coverage();
         }
 
         seenUrls.add(nextUrl);
@@ -1402,7 +1411,7 @@ class RentCarsScraper {
       }
 
       if (!loaded) {
-        return mmCoverageFound;
+        return coverage();
       }
 
       await this.waitForResults(page);
@@ -1415,21 +1424,15 @@ class RentCarsScraper {
       );
       accumulatedOffers.push(...await this.collectOffersFromCurrentPage(page, target));
       if (!hasNewResultEvidence) {
-        return hasMmCarsOfferForConfiguredViews([
-          ...collector.getOffers(),
-          ...accumulatedOffers
-        ], this.config.transmission);
+        return coverage();
       }
     }
 
-    const combinedOffers = dedupeOffers([
-      ...collector.getOffers(),
-      ...accumulatedOffers
-    ]);
-    if (hasMmCarsOfferForConfiguredViews(combinedOffers, this.config.transmission)) {
-      return true;
+    const current = coverage();
+    if (current.mmCoverageComplete && current.rankingCoverageComplete) {
+      return current;
     }
-    return !(await this.findLoadMoreControl(page));
+    return coverage(!(await this.findLoadMoreControl(page)));
   }
 
   async findLoadMoreControl(page) {

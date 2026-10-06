@@ -332,6 +332,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       artifact_url: ${{ steps.upload.outputs['artifact-url'] }}
+      report_ready: ${{ steps.report.outputs.report_exists == 'true' && steps.metadata.outputs.metadata_exists == 'true' && 'true' || 'false' }}
 
     steps:
       - name: Checkout repository
@@ -442,10 +443,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Fail incomplete merged report for workflow retry
+        if: always()
+        shell: bash
+        run: node src/rentcars/validateSmokeResult.js 0 output/rentcars-results-latest.json
+
   publish:
     name: Publish RentCars.pl report
     needs: merge
-    if: always() && !cancelled() && needs.merge.result == 'success'
+    if: always() && !cancelled() && needs.merge.outputs.report_ready == 'true' && needs.merge.outputs.artifact_url != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
@@ -612,7 +618,7 @@ jobs:
             fi
           fi
 
-          if [[ -n "$pages_url" ]]; then
+          if [[ -n "$pages_url" && -s notification-input/rentcars-report.html ]]; then
             profile_url="${pages_url}${REPORT_PROFILE}/"
             for attempt in {1..8}; do
               rm -f "$metadata_path"
@@ -633,7 +639,8 @@ jobs:
                     --write-out "%{http_code}" \
                     "${profile_url}report.html?run=${GITHUB_RUN_ID}&run_attempt=${GITHUB_RUN_ATTEMPT}&check=${attempt}"); then
                     if [[ "$html_status" == "200" ]] \
-                      && grep --fixed-strings --quiet '<meta name="rentcars-report-metadata-version" content="1">' "$html_path"; then
+                      && grep --fixed-strings --quiet '<meta name="rentcars-report-metadata-version" content="1">' "$html_path" \
+                      && cmp --silent notification-input/rentcars-report.html "$html_path"; then
                       page_url="$profile_url"
                       break
                     fi

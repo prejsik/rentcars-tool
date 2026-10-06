@@ -35,9 +35,9 @@ function formatProviderRating(rating) {
   return numeric.toFixed(1).replace(/\.0$/, "");
 }
 
-function formatProviderName(offer) {
+function formatProviderName(offer, incomplete = false) {
   if (!offer) {
-    return "Not available";
+    return incomplete ? "Niepe\u0142ne dane" : "Not available";
   }
   const name = String(offer.provider_name || "Not available").trim() || "Not available";
   const rating = formatProviderRating(offer.provider_rating);
@@ -137,9 +137,9 @@ function mmClassName(offer, rankedOffers) {
   return isMmCloseToHigherRankedProvider(offer, rankedOffers) ? "mm mm-close" : "mm";
 }
 
-function formatOfferPrice(offer) {
+function formatOfferPrice(offer, incomplete = false) {
   if (!offer || !Number.isFinite(Number(offer.total_price))) {
-    return "Not available";
+    return incomplete ? "Niepe\u0142ne dane" : "Not available";
   }
   const pricePerDay = Number.isFinite(Number(offer.daily_price))
     ? Number(offer.daily_price)
@@ -329,15 +329,16 @@ function buildScenarioRows(rootPayload, scenarioPayload) {
       const allHigh = isTop1High(allRanked);
       const automaticHigh = isTop1High(automaticRanked);
       const incomplete = isTargetIncomplete(scenarioPayload, row.location, row.sortOrder);
+      const rankingIncomplete = isTargetIncomplete(scenarioPayload, row.location, row.sortOrder, "ranking_coverage_complete");
       return `<tr class="${rowClass}" data-location="${escapeHtml(row.location)}" data-location-type="${isAirportLocation(row.location) ? "airport" : "branch"}" data-mm-state-automatic="${getMmState(automaticRanked, incomplete)}" data-mm-state-all="${getMmState(allRanked, incomplete)}" data-top1-high-automatic="${automaticHigh}" data-top1-high-all="${allHigh}">
         <td class="index">${index}</td>
         <td class="location">${escapeHtml(row.location)}</td>
-        ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[0])), escapeHtml(formatProviderName(allTop3[0])), mmClassName(automaticTop3[0], automaticTop3), mmClassName(allTop3[0], allTop3))}
-        ${buildDualCell(escapeHtml(formatOfferPrice(automaticTop3[0])), escapeHtml(formatOfferPrice(allTop3[0])), automaticHigh ? "top1-high" : "", allHigh ? "top1-high" : "")}
-        ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[1])), escapeHtml(formatProviderName(allTop3[1])), mmClassName(automaticTop3[1], automaticTop3), mmClassName(allTop3[1], allTop3))}
-        ${buildDualCell(escapeHtml(formatOfferPrice(automaticTop3[1])), escapeHtml(formatOfferPrice(allTop3[1])))}
-        ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[2])), escapeHtml(formatProviderName(allTop3[2])), mmClassName(automaticTop3[2], automaticTop3), mmClassName(allTop3[2], allTop3))}
-        ${buildDualCell(escapeHtml(formatOfferPrice(automaticTop3[2])), escapeHtml(formatOfferPrice(allTop3[2])))}
+        ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[0], rankingIncomplete)), escapeHtml(formatProviderName(allTop3[0], rankingIncomplete)), mmClassName(automaticTop3[0], automaticTop3), mmClassName(allTop3[0], allTop3))}
+        ${buildDualCell(escapeHtml(formatOfferPrice(automaticTop3[0], rankingIncomplete)), escapeHtml(formatOfferPrice(allTop3[0], rankingIncomplete)), automaticHigh ? "top1-high" : "", allHigh ? "top1-high" : "")}
+        ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[1], rankingIncomplete)), escapeHtml(formatProviderName(allTop3[1], rankingIncomplete)), mmClassName(automaticTop3[1], automaticTop3), mmClassName(allTop3[1], allTop3))}
+        ${buildDualCell(escapeHtml(formatOfferPrice(automaticTop3[1], rankingIncomplete)), escapeHtml(formatOfferPrice(allTop3[1], rankingIncomplete)))}
+        ${buildDualCell(escapeHtml(formatProviderName(automaticTop3[2], rankingIncomplete)), escapeHtml(formatProviderName(allTop3[2], rankingIncomplete)), mmClassName(automaticTop3[2], automaticTop3), mmClassName(allTop3[2], allTop3))}
+        ${buildDualCell(escapeHtml(formatOfferPrice(automaticTop3[2], rankingIncomplete)), escapeHtml(formatOfferPrice(allTop3[2], rankingIncomplete)))}
         ${buildDualCell(escapeHtml(formatOfferPrice(automaticMm)), escapeHtml(formatOfferPrice(allMm)), automaticMm ? mmClassName(automaticMm, automaticRanked) : "muted", allMm ? mmClassName(allMm, allRanked) : "muted")}
         ${buildDualCell(escapeHtml(mmRankLabel(automaticRanked, incomplete)), escapeHtml(mmRankLabel(allRanked, incomplete)), "rank-cell", "rank-cell")}
         ${buildDualCell(escapeHtml(cheaperOffersLabel(automaticRanked)), escapeHtml(cheaperOffersLabel(allRanked)), "count-cell", "count-cell")}
@@ -583,7 +584,6 @@ function buildHtmlReport(payload) {
     th:nth-child(4), th:nth-child(6), th:nth-child(8), th:nth-child(9), th:nth-child(10), th:nth-child(11),
     td:nth-child(4), td:nth-child(6), td:nth-child(8), td:nth-child(9), td:nth-child(10), td:nth-child(11) {
       text-align: right;
-      white-space: nowrap;
     }
 
     td.index {

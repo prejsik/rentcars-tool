@@ -121,6 +121,21 @@ test("observed MM stays present in HTML even when the automatic search is incomp
   assert.equal(buildDetailRows(payload([input]))[0].mm_status, "present");
 });
 
+test("HTML distinguishes unread competitors from exhausted results without hiding known MM", () => {
+  const unfinished = scenario([["MM Cars Rental", 100]]);
+  unfinished.expected_targets[0].ranking_coverage_complete = false;
+  const exhausted = scenario([["MM Cars Rental", 100]]);
+  exhausted.expected_targets[0].ranking_coverage_complete = true;
+  const html = buildHtmlReport(payload([unfinished, exhausted]));
+  const rows = html.match(/<tr class="(?:even|odd)"[^>]*>[\s\S]*?<\/tr>/g);
+  assert.match(rows[0], /Niepe\u0142ne dane/);
+  assert.doesNotMatch(rows[0], /Not available/);
+  assert.match(rows[0], /Top 1/);
+  assert.match(rows[0], /100\.00 PLN\/day/);
+  assert.doesNotMatch(rows[1], /Niepe\u0142ne dane/);
+  assert.match(rows[1], /Not available/);
+});
+
 test("failed checks and checks without offers are not confirmed MM absence", () => {
   const data = payload([
     scenario([["Other", 100]], true, { errors: [{ location, sort_order: sortOrder, error: "timeout" }] }),

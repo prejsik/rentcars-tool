@@ -250,6 +250,9 @@ function buildScenarioPayload({ config, scenarioConfig, durationDays, results, f
     if (typeof target.mmCoverageComplete === "boolean") {
       normalized.mm_coverage_complete = target.mmCoverageComplete;
     }
+    if (typeof target.rankingCoverageComplete === "boolean") {
+      normalized.ranking_coverage_complete = target.rankingCoverageComplete;
+    }
     return normalized;
   });
   const expectedLocations = [...new Set(normalizedExpectedTargets

@@ -12,7 +12,7 @@
   "headless": true,
   "timeoutMs": 30000,
   "locationConcurrency": 2,
-  "maxAdditionalResultPages": 1,
+  "maxAdditionalResultPages": 10,
   "browserExecutablePath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "outputCsv": "output/rentcars-results.csv",
   "artifactsDir": "artifacts/rentcars"

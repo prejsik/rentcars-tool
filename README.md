@@ -49,7 +49,7 @@ Default local profile in the example config:
 - `durationsDays: [2]`
 - `sortOrders: ["price_insurance"]`
 - `transmission: "any"`
-- `maxAdditionalResultPages: 1`
+- `maxAdditionalResultPages: 10` (hard limit: 10; stops early once Top 3 and MM coverage are known)
 - starts from tomorrow and checks 30 rolling pickup start dates
 
 Generate the RentCars.pl HTML report from that JSON:
@@ -67,6 +67,7 @@ node .\src\rentcars\reportXlsx.js .\output\rentcars-results-latest.json .\output
 Report interpretation:
 
 - `Niepelne dane MM` in the HTML filter and `unknown` / `incomplete` in Excel mean MM absence could not be confirmed. These checks are excluded from confirmed absence counts and pricing aggregates. Legacy JSON files without coverage flags retain their previous interpretation.
+- Competitor coverage is tracked separately as `ranking_coverage_complete`. If pagination stops before Top 3 is known, empty ranking cells show `Niepelne dane`; this does not turn an observed MM offer into an absence or trigger another full run. Exhausted results with fewer than three providers still show `Not available`.
 - Gaps to TOP1 are calculated only where MM is present and ranks below first. Room for a price increase is calculated only where MM ranks first and another provider is available. Missing values remain blank, not zero.
 - Equal-price providers retain their order in the source results in both HTML and Excel.
 - An empty partial run can still generate an Excel workbook showing its status and lack of data.
@@ -91,7 +92,7 @@ If collection and merging succeeded and only publication or notification failed,
 
 For every completion event, the watchdog reads the exact run directly before inspecting its jobs. It uses the current API status and attempt rather than stale event data, and rechecks both immediately before requesting a retry. Search-form submission also waits for the button and result state within the configured timeout, clicks once, and preserves click/navigation errors instead of mislabeling them as a missing button.
 
-Report generation, Pages publication, and Telegram notification are separate jobs. The notification does not need a repository checkout or approval of the Pages environment. It waits for publication only for a bounded period and includes an HTML link only when the public metadata matches the current run and attempt and the HTML endpoint returns a recognizable report. Otherwise it sends the available artifact link and workflow link without presenting an older HTML report as current. A later Pages publication does not send a second completion message.
+Report generation, Pages publication, and Telegram notification are separate jobs. After saving and uploading the report, a completeness gate fails the merge job for partial or erroneous results. The preserved partial report can still be published and sent with its actual status; missing reports cannot be published. The notification does not need a repository checkout or approval of the Pages environment. It waits for publication only for a bounded period and includes an HTML link only when the public metadata matches the current run and attempt and the public HTML is byte-for-byte identical to the HTML in that run's downloaded artifact. Otherwise it sends the available artifact link and workflow link without presenting an older HTML report as current. A later Pages publication does not send a second completion message.
 
 The separate `rentcars-morning.yml` workflow schedules a morning Telegram status at **07:00 Europe/Warsaw**, with daylight-saving time handled by the schedule timezone. GitHub may delay the trigger; the message includes the actual inspection time. It inspects only today's trusted daily/recovery run and its current attempt, without starting collection or publishing anything. Existing completion notifications remain enabled.
 

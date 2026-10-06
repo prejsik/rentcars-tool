@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
+const vm = require("node:vm");
 const { yaml } = require("../node_modules/playwright-core/lib/utilsBundle");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -65,7 +66,7 @@ test("daily notification is independent from Pages and has read-only permissions
   assert.equal(daily.jobs.merge.environment, undefined);
   assert.equal(daily.jobs.publish.environment.name, "github-pages");
   assert.equal([].concat(daily.jobs.publish.needs).includes("notify"), false);
-  assert.match(String(daily.jobs.publish.if), /always\(\).*needs\.merge\.result == 'success'/);
+  assert.match(String(daily.jobs.publish.if), /always\(\)/);
   assert.match(String(daily.jobs.publish.outputs.published), /pages-deployment\.outcome == 'success'/);
 });
 
@@ -77,105 +78,133 @@ test("cancelling a daily run blocks merging and publishing its partial report", 
   }
 });
 
-test("daily notification sends one verified report link or one bounded link-free fallback", () => {
+function executeNotification({ withBody, pagesSiteAvailable = true, metadataAttempt = "2", metadataRunId = "77",
+  malformedMetadata = false, htmlStatus = "200", htmlMarker = true, staleHtml = false,
+  localHtmlAvailable = true, reportProfile = "afternoon", notificationPayload, mergeResult = "success",
+  expectedMetadataRequests }) {
   const daily = workflow(".github/workflows/rentcars-daily.yml");
   const sendStep = daily.jobs.notify.steps.find((step) => step.name === "Send Telegram notification");
   const bashPath = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
 
   assert.ok(sendStep, "daily notification must have a send step");
 
-  function execute({ withBody, pagesSiteAvailable = true, metadataAttempt = "2", htmlStatus = "200", htmlMarker = true,
-    reportProfile = "afternoon" }) {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "rentcars-notify-shell-"));
-    const inputDir = path.join(tempDir, "notification-input");
-    const capturePath = path.join(tempDir, "telegram-message.txt");
-    const bashEnvPath = path.join(tempDir, "bash-env.sh");
-    fs.mkdirSync(inputDir);
-    if (withBody) {
-      fs.writeFileSync(path.join(inputDir, "rentcars-notification-body.txt"), "RentCars.pl: run finished (complete).", "utf8");
-    }
-    fs.writeFileSync(bashEnvPath, [
-      "curl() {",
-      "  local output_path=''",
-      "  local is_pages_api=false",
-      "  local is_metadata=false",
-      "  local is_html=false",
-      "  local previous=''",
-      "  local argument",
-      "  for argument in \"$@\"; do",
-      "    if [[ \"$previous\" == '--output' ]]; then output_path=\"$argument\"; fi",
-      "    if [[ \"$argument\" == */repos/*/pages ]]; then is_pages_api=true; fi",
-      "    if [[ \"$argument\" == *report-meta.json* ]]; then is_metadata=true; fi",
-      "    if [[ \"$argument\" == https://*report.html* ]]; then is_html=true; fi",
-      "    previous=\"$argument\"",
-      "  done",
-      "  if [[ \"$is_pages_api\" == true ]]; then",
-      "    if [[ \"$MOCK_PAGES_SITE_AVAILABLE\" == true ]]; then",
-      "      printf '{\"html_url\":\"https://reports.example.test/rentcars\"}' > \"$output_path\"",
-      "      printf '200'",
-      "    else",
-      "      printf '404'",
-      "    fi",
-      "    return 0",
-      "  fi",
-      "  if [[ \"$is_metadata\" == true ]]; then",
-      "    printf '{\"run_id\":\"%s\",\"run_attempt\":%s}' \"$GITHUB_RUN_ID\" \"$MOCK_METADATA_ATTEMPT\" > \"$output_path\"",
-      "    printf '200'",
-      "    return 0",
-      "  fi",
-      "  if [[ \"$is_html\" == true ]]; then",
-      "    if [[ \"$MOCK_HTML_MARKER\" == true ]]; then",
-      "      printf '<meta name=\"rentcars-report-metadata-version\" content=\"1\">' > \"$output_path\"",
-      "    else",
-      "      printf '<html>Service unavailable</html>' > \"$output_path\"",
-      "    fi",
-      "    printf '%s' \"$MOCK_HTML_STATUS\"",
-      "    return 0",
-      "  fi",
-      "  while [[ $# -gt 0 ]]; do",
-      "    if [[ \"$1\" == text=* ]]; then printf '%s' \"${1#text=}\" > \"$CAPTURE_PATH\"; fi",
-      "    shift",
-      "  done",
-      "}",
-      "sleep() { :; }",
-      "export -f curl sleep"
-    ].join("\n"), "utf8");
-
-    try {
-      const result = spawnSync(bashPath, ["--noprofile", "--norc", "-c", sendStep.run], {
-        cwd: tempDir,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          BASH_ENV: bashEnvPath.replaceAll("\\", "/"),
-          CAPTURE_PATH: capturePath.replaceAll("\\", "/"),
-          RUNNER_TEMP: tempDir.replaceAll("\\", "/"),
-          MOCK_PAGES_SITE_AVAILABLE: pagesSiteAvailable ? "true" : "false",
-          MOCK_METADATA_ATTEMPT: metadataAttempt,
-          MOCK_HTML_STATUS: htmlStatus,
-          MOCK_HTML_MARKER: htmlMarker ? "true" : "false",
-          TELEGRAM_BOT_TOKEN: "test-token",
-          TELEGRAM_CHAT_ID: "test-chat",
-          GITHUB_TOKEN: "test-github-token",
-          ARTIFACT_URL: "https://github.test/artifacts/55",
-          RUN_URL: "https://github.test/actions/runs/77",
-          GITHUB_RUN_ID: "77",
-          GITHUB_RUN_ATTEMPT: "2",
-          GITHUB_API_URL: "https://api.github.test",
-          GITHUB_REPOSITORY: "mmcars/rentcars",
-          GITHUB_REPOSITORY_OWNER: "mmcars",
-          REPORT_PROFILE: reportProfile,
-          PLAN_RESULT: "success",
-          SCRAPE_RESULT: "success",
-          MERGE_RESULT: "success"
-        }
-      });
-      assert.equal(result.status, 0, result.stderr);
-      return fs.readFileSync(capturePath, "utf8");
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "rentcars-notify-shell-"));
+  const inputDir = path.join(tempDir, "notification-input");
+  const capturePath = path.join(tempDir, "telegram-message.txt");
+  const bashEnvPath = path.join(tempDir, "bash-env.sh");
+  const requestsPath = path.join(tempDir, "requests.txt");
+  const publicHtmlPath = path.join(tempDir, "public.html");
+  const publicMetaPath = path.join(tempDir, "public-meta.json");
+  const expectedHtml = '<!doctype html><meta name="rentcars-report-metadata-version" content="1"><h1>Run 77/2</h1><p>220 PLN</p>';
+  fs.mkdirSync(inputDir);
+  if (localHtmlAvailable) {
+    fs.writeFileSync(path.join(inputDir, "rentcars-report.html"), expectedHtml);
   }
+  fs.writeFileSync(publicHtmlPath, htmlMarker
+    ? staleHtml ? expectedHtml.replace("220 PLN", "200 PLN") : expectedHtml
+    : "<html>Service unavailable</html>");
+  fs.writeFileSync(publicMetaPath, malformedMetadata ? "{not-json"
+    : JSON.stringify({ run_id: metadataRunId, run_attempt: Number(metadataAttempt) }));
+  if (withBody) {
+    const body = notificationPayload
+      ? require("../src/rentcars/dailyNotification").buildDailyNotification(notificationPayload)
+      : "RentCars.pl: run finished (complete).";
+    fs.writeFileSync(path.join(inputDir, "rentcars-notification-body.txt"), body, "utf8");
+  }
+  fs.writeFileSync(bashEnvPath, [
+    "curl() {",
+    "  local output_path=''",
+    "  local is_pages_api=false",
+    "  local is_metadata=false",
+    "  local is_html=false",
+    "  local previous=''",
+    "  local argument",
+    "  for argument in \"$@\"; do",
+    "    if [[ \"$previous\" == '--output' ]]; then output_path=\"$argument\"; fi",
+    "    if [[ \"$argument\" == */repos/*/pages ]]; then is_pages_api=true; fi",
+    "    if [[ \"$argument\" == *report-meta.json* ]]; then is_metadata=true; fi",
+    "    if [[ \"$argument\" == https://*report.html* ]]; then is_html=true; fi",
+    "    previous=\"$argument\"",
+    "  done",
+    "  if [[ \"$is_pages_api\" == true ]]; then",
+    "    if [[ \"$MOCK_PAGES_SITE_AVAILABLE\" == true ]]; then",
+    "      printf '{\"html_url\":\"https://reports.example.test/rentcars\"}' > \"$output_path\"",
+    "      printf '200'",
+    "    else",
+    "      printf '404'",
+    "    fi",
+    "    return 0",
+    "  fi",
+    "  if [[ \"$is_metadata\" == true ]]; then",
+    "    echo metadata >> \"$REQUESTS_PATH\"",
+    "    cp \"$MOCK_PUBLIC_META_PATH\" \"$output_path\"",
+    "    printf '200'",
+    "    return 0",
+    "  fi",
+    "  if [[ \"$is_html\" == true ]]; then",
+    "    echo html >> \"$REQUESTS_PATH\"",
+    "    cp \"$MOCK_PUBLIC_HTML_PATH\" \"$output_path\"",
+    "    printf '%s' \"$MOCK_HTML_STATUS\"",
+    "    return 0",
+    "  fi",
+    "  echo telegram >> \"$REQUESTS_PATH\"",
+    "  while [[ $# -gt 0 ]]; do",
+    "    if [[ \"$1\" == text=* ]]; then printf '%s' \"${1#text=}\" > \"$CAPTURE_PATH\"; fi",
+    "    shift",
+    "  done",
+    "}",
+    "sleep() { echo sleep >> \"$REQUESTS_PATH\"; }",
+    "export -f curl sleep"
+  ].join("\n"), "utf8");
+
+  try {
+    const result = spawnSync(bashPath, ["--noprofile", "--norc", "-eo", "pipefail", "-c", sendStep.run], {
+      cwd: tempDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        BASH_ENV: bashEnvPath.replaceAll("\\", "/"),
+        CAPTURE_PATH: capturePath.replaceAll("\\", "/"),
+        RUNNER_TEMP: tempDir.replaceAll("\\", "/"),
+        MOCK_PAGES_SITE_AVAILABLE: pagesSiteAvailable ? "true" : "false",
+        MOCK_PUBLIC_META_PATH: publicMetaPath.replaceAll("\\", "/"),
+        MOCK_PUBLIC_HTML_PATH: publicHtmlPath.replaceAll("\\", "/"),
+        REQUESTS_PATH: requestsPath.replaceAll("\\", "/"),
+        MOCK_HTML_STATUS: htmlStatus,
+        TELEGRAM_BOT_TOKEN: "test-token",
+        TELEGRAM_CHAT_ID: "test-chat",
+        GITHUB_TOKEN: "test-github-token",
+        ARTIFACT_URL: "https://github.test/artifacts/55",
+        RUN_URL: "https://github.test/actions/runs/77",
+        GITHUB_RUN_ID: "77",
+        GITHUB_RUN_ATTEMPT: "2",
+        GITHUB_API_URL: "https://api.github.test",
+        GITHUB_REPOSITORY: "mmcars/rentcars",
+        GITHUB_REPOSITORY_OWNER: "mmcars",
+        REPORT_PROFILE: reportProfile,
+        PLAN_RESULT: "success",
+        SCRAPE_RESULT: "success",
+        MERGE_RESULT: mergeResult
+      }
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const requests = fs.readFileSync(requestsPath, "utf8").trim().split(/\r?\n/);
+    assert.equal(requests.filter(value => value === "telegram").length, 1);
+    for (const kind of ["metadata", "html"]) {
+      assert.ok(requests.filter(value => value === kind).length <= 8, `${kind} requests must remain bounded`);
+    }
+    assert.ok(requests.filter(value => value === "sleep").length <= 7);
+    if (expectedMetadataRequests !== undefined) {
+      assert.equal(requests.filter(value => value === "metadata").length, expectedMetadataRequests);
+    }
+    return fs.readFileSync(capturePath, "utf8");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+test("daily notification sends one verified report link or one bounded link-free fallback", () => {
+  const execute = executeNotification;
 
   const successMessage = execute({ withBody: true });
   assert.equal((successMessage.match(/RentCars\.pl: run finished/g) || []).length, 1);
@@ -204,6 +233,70 @@ test("daily notification sends one verified report link or one bounded link-free
     const invalidHtmlMessage = execute({ withBody: true, ...failure });
     assert.doesNotMatch(invalidHtmlMessage, /report\.html/);
     assert.match(invalidHtmlMessage, /GitHub Pages deployment was not confirmed for this run/);
+  }
+});
+
+test("fresh metadata with modified stale HTML keeps the notification link-free after eight checks", () => {
+  const message = executeNotification({ withBody: true, staleHtml: true, expectedMetadataRequests: 8 });
+  assert.doesNotMatch(message, /Current HTML report|report\.html/);
+  assert.match(message, /GitHub Pages deployment was not confirmed for this run\.\n\nArtifact backup:/);
+});
+
+test("notification requires local artifact HTML and valid current run identity", () => {
+  for (const options of [
+    { localHtmlAvailable: false, expectedMetadataRequests: 0 },
+    { metadataRunId: "76", expectedMetadataRequests: 8 },
+    { malformedMetadata: true, expectedMetadataRequests: 8 }
+  ]) {
+    const message = executeNotification({ withBody: true, ...options });
+    assert.doesNotMatch(message, /Current HTML report|report\.html/);
+    assert.match(message, /GitHub Pages deployment was not confirmed for this run\.\n\nArtifact backup:/);
+  }
+});
+
+test("failed partial merge still notifies its real status and may link its exact published artifact", () => {
+  const message = executeNotification({ withBody: true, mergeResult: "failure", notificationPayload: {
+    run_status: "partial", completed_scenario_count: 1, expected_scenario_count: 2,
+    successful_check_count: 1, failed_check_count: 0, missing_check_count: 1, expected_check_count: 2,
+    scenarios: []
+  } });
+  assert.match(message, /run finished \(partial; 1\/2 scenarios; 1 successful, 0 failed, 1 missing \/ 2 checks/);
+  assert.doesNotMatch(message, /run finished \(complete/);
+  assert.match(message, /Current HTML report:/);
+  assert.match(message, /Artifact backup:/);
+});
+
+function evaluateExpression(expression, context) {
+  return vm.runInNewContext(String(expression).replace(/^\$\{\{\s*|\s*\}\}$/g, ""), context);
+}
+
+test("publication accepts saved partial reports without disguising merge failure and blocks missing reports", () => {
+  const daily = workflow(".github/workflows/rentcars-daily.yml");
+  const cases = [
+    ["complete", "success", true, true, false, true],
+    ["partial", "failure", true, true, false, true],
+    ["complete_with_errors", "failure", true, true, false, true],
+    ["no report", "failure", false, true, false, false],
+    ["no artifact", "success", true, false, false, false],
+    ["cancelled", "failure", true, true, true, false]
+  ];
+  for (const [name, result, ready, uploaded, isCancelled, expected] of cases) {
+    const context = {
+      always: () => true, cancelled: () => isCancelled,
+      steps: { report: { outputs: { report_exists: ready ? "true" : "" } },
+        metadata: { outputs: { metadata_exists: ready ? "true" : "" } },
+        upload: { outputs: { "artifact-url": uploaded ? "https://github.test/artifacts/55" : "" } } }
+    };
+    const outputs = Object.fromEntries(Object.entries(daily.jobs.merge.outputs)
+      .map(([key, expression]) => [key, evaluateExpression(expression, context)]));
+    context.needs = { merge: { result, outputs }, plan: { result: "success", outputs: { should_run: "true" } } };
+    assert.equal(Boolean(evaluateExpression(daily.jobs.publish.if, context)), expected, name);
+    assert.equal(evaluateExpression(daily.jobs.notify.if, context), true, `${name}: notify still runs`);
+  }
+  for (const [reportExists, metadataExists] of [[true, false], [false, true]]) {
+    const context = { steps: { report: { outputs: { report_exists: String(reportExists) } },
+      metadata: { outputs: { metadata_exists: String(metadataExists) } } } };
+    assert.notEqual(evaluateExpression(daily.jobs.merge.outputs.report_ready, context), "true");
   }
 });
 

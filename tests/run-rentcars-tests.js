@@ -64,7 +64,7 @@ runTest("loadConfig uses RentCars defaults and output folders", () => {
   assert.deepEqual(config.locations, ["Warszawa"]);
   assert.deepEqual(config.sortOrders, ["price_insurance"]);
   assert.equal(config.transmission, "any");
-  assert.equal(config.maxAdditionalResultPages, 1);
+  assert.equal(config.maxAdditionalResultPages, 10);
   assert.match(config.outputCsv, /rentcars-results-/);
   assert.match(config.artifactsDir, /artifacts[\\/]rentcars$/);
 });
@@ -361,7 +361,7 @@ runAsyncTest("failed direct search falls back to the RentCars search form", asyn
     priceVerified: true,
     transmission: "automatic"
   }];
-  scraper.loadAdditionalResultPages = async () => true;
+  scraper.loadAdditionalResultPages = async () => ({ mmCoverageComplete: true, rankingCoverageComplete: true });
 
   const outcome = await scraper.runSingleLocation(browser, {
     requestedLocation: "Warszawa",
@@ -431,7 +431,7 @@ runAsyncTest("pagination continues past three providers until MM is found", asyn
     accumulatedOffers
   );
 
-  assert.equal(complete, true);
+  assert.deepEqual(complete, { mmCoverageComplete: true, rankingCoverageComplete: true });
   assert.equal(loadMoreChecks, 1);
   assert.equal(accumulatedOffers.at(-1).provider, "MM Cars Rental");
 });
@@ -474,7 +474,7 @@ runAsyncTest("pagination reports incomplete MM coverage when more results remain
     }))
   );
 
-  assert.equal(complete, false);
+  assert.deepEqual(complete, { mmCoverageComplete: false, rankingCoverageComplete: true });
   assert.equal(loadMoreChecks, 2);
 });
 
