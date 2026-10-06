@@ -63,7 +63,7 @@ function delay(ms) {
 }
 
 function shouldRetryLocationOutcome(outcome) {
-  return /No offers could be extracted|No valid offers|Could not find|Could not select|was not accepted|timed? out|navigation|Target page|browser has been closed/i
+  return /No offers could be extracted|No valid offers|Could not find|Could not select|was not accepted|timed?\s*out|navigation|Target page|browser has been closed/i
     .test(String(outcome?.error?.message || ""));
 }
 
