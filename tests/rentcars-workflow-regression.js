@@ -369,8 +369,9 @@ test("schedule gate and matrix retain day, night, retry and manual date ranges",
       }));
       assert.equal(Number(values.rolling_days), expectedDays);
       assert.equal(Number(values.expected_scenario_count), expectedDays * 13);
-      assert.equal(Number(values.expected_check_count), expectedDays * 13 * 9);
+      assert.equal(Number(values.expected_check_count), expectedDays * 13 * 10);
       if (shouldRun) {
+        assert.ok(values.locations.split(",").includes("Szczecin"));
         assert.equal(values.start_dates.split(",").length, expectedDays);
         assert.equal(JSON.parse(values.matrix).include.length, Math.ceil(expectedDays / 3));
       }

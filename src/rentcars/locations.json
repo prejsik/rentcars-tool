@@ -47,5 +47,11 @@
     "airports": [
       { "label": "Łódź, Lotnisko-Lublinek", "id": "55" }
     ]
+  },
+  {
+    "city": "Szczecin",
+    "airports": [
+      { "label": "Szczecin, Lotnisko-Goleniów", "id": "58" }
+    ]
   }
 ]

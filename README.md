@@ -35,7 +35,7 @@ Interactive local launcher:
 .\start-rentcars.bat
 ```
 
-It opens a Windows options window similar to the DiscoverCars launcher. The default city set comes from `src/rentcars/locations.json` and includes DiscoverCars cities plus Bydgoszcz and Lodz.
+It opens a Windows options window similar to the DiscoverCars launcher. The default city set comes from `src/rentcars/locations.json` and includes DiscoverCars cities plus Bydgoszcz, Lodz and Szczecin (Goleniow airport), for ten airport pickup points in total.
 
 Save the GitHub-style JSON payload:
 

@@ -69,11 +69,20 @@ runTest("loadConfig uses RentCars defaults and output folders", () => {
   assert.match(config.artifactsDir, /artifacts[\\/]rentcars$/);
 });
 
-runTest("shared location catalog is the default and includes nine airport checks", () => {
+runTest("shared location catalog is the default and includes ten airport checks", () => {
   const config = loadConfig(["--config=rentcars.config.example.json"]);
 
   assert.deepEqual(config.locations, defaultLocationCities());
-  assert.equal(expectedAirportCount(config.locations), 9);
+  assert.ok(config.locations.includes("Szczecin"));
+  assert.equal(expectedAirportCount(config.locations), 10);
+});
+
+runAsyncTest("Szczecin resolves only to Goleniow airport with its verified RentCars ID", async () => {
+  const scraper = new RentCarsScraper({ baseUrl: "https://rentcars.pl" });
+  const targets = await scraper.resolveLocationSearchTargets(null, ["Szczecin"]);
+  assert.deepEqual(targets.map(({ location, value }) => ({ location, value })), [
+    { location: "Szczecin, Lotnisko-Goleniów", value: "58" }
+  ]);
 });
 
 runTest("loadConfig supports one rolling start date and duration 2", () => {
