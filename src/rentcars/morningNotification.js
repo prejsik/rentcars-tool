@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const { isTrustedDailyRun } = require("./watchdog");
+const { isTrustedDailyRun, primaryRunCycleDate } = require("./watchdog");
 
 const TIME_ZONE = "Europe/Warsaw";
 const isScrape = (job) => String(job?.name || "").startsWith("Scrape chunk ");
@@ -54,13 +54,14 @@ async function collectMorningMessage({ repository, defaultBranch, token, now = D
     return response.json();
   };
   const date = warsawDate(now);
+  const cycleDate = primaryRunCycleDate(now);
   const header = `RentCars.pl: status poranny 07:00 | ${date}\nStan na ${new Intl.DateTimeFormat("pl-PL", { timeZone: TIME_ZONE, hour: "2-digit", minute: "2-digit" }).format(new Date(now))} (${TIME_ZONE}).`;
   const payload = await api(`actions/workflows/rentcars-daily.yml/runs?branch=${encodeURIComponent(defaultBranch)}&per_page=100`);
   const runs = (payload.workflow_runs || []).filter((run) =>
     isTrustedDailyRun(run, { repository, defaultBranch })
     && String(run.display_title || "") !== "RentCars daytime run"
     && Number.isFinite(Date.parse(run.created_at)) && Date.parse(run.created_at) <= now
-    && warsawDate(Date.parse(run.created_at)) === date
+    && primaryRunCycleDate(Date.parse(run.created_at)) === cycleDate
   ).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
   let selected;
   let jobs;
@@ -80,7 +81,7 @@ async function collectMorningMessage({ repository, defaultBranch, token, now = D
     if (!hasWork && run.status === "completed" && run.conclusion === "success") continue;
     selected = run; jobs = collected; break;
   }
-  if (!selected) return `${header}\n\nBrak dzisiejszego uruchomienia zbierajacego dane.\nETA: nie mozna oszacowac przed startem.\n\nGitHub Actions:\n${serverUrl}/${repository}/actions/workflows/rentcars-daily.yml`;
+  if (!selected) return `${header}\n\nBrak uruchomienia dla cyklu raportu ${cycleDate} (start o 19:17 poprzedniego dnia).\nETA: nie mozna oszacowac przed startem.\n\nGitHub Actions:\n${serverUrl}/${repository}/actions/workflows/rentcars-daily.yml`;
   const runUrl = `${serverUrl}/${repository}/actions/runs/${selected.id}`;
   const chunks = jobs.filter(isScrape);
   const successCount = chunks.filter(successful).length;

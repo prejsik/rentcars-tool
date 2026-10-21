@@ -1,11 +1,11 @@
 name: RentCars daily run
-run-name: ${{ github.event_name == 'schedule' && github.event.schedule == '0 10 * * *' && 'RentCars daytime run' || inputs.watchdog_recovery == 'true' && 'RentCars watchdog recovery' || 'RentCars daily run' }}
+run-name: ${{ github.event_name == 'schedule' && github.event.schedule == '17 10 * * *' && 'RentCars daytime run' || inputs.watchdog_recovery == 'true' && 'RentCars watchdog recovery' || 'RentCars daily run' }}
 
 on:
   schedule:
-    - cron: "17 23 * * *"
-    - cron: "17 0 * * *"
-    - cron: "0 10 * * *"
+    - cron: "17 19 * * *"
+      timezone: "Europe/Warsaw"
+    - cron: "17 10 * * *"
       timezone: "Europe/Warsaw"
   workflow_dispatch:
     inputs:
@@ -45,7 +45,7 @@ permissions:
   id-token: write
 
 env:
-  REPORT_PROFILE: ${{ github.event_name == 'schedule' && github.event.schedule == '0 10 * * *' && 'afternoon' || 'morning' }}
+  REPORT_PROFILE: ${{ github.event_name == 'schedule' && github.event.schedule == '17 10 * * *' && 'afternoon' || 'morning' }}
   SCHEDULE_ROLLING_DAYS: "60"
   SCHEDULE_DAYTIME_ROLLING_DAYS: "20"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"
@@ -87,33 +87,29 @@ jobs:
             exit 0
           fi
 
-          if [[ "$trigger_schedule" == "0 10 * * *" ]]; then
-            echo "Daytime Warsaw trigger selected."
+          if [[ "$trigger_schedule" == "17 10 * * *" || "$trigger_schedule" == "17 19 * * *" ]]; then
+            echo "Configured Warsaw trigger selected: $trigger_schedule"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          scheduled_minute="${trigger_schedule%% *}"
-          schedule_tail="${trigger_schedule#* }"
-          scheduled_hour="${schedule_tail%% *}"
-          utc_date="$(date -u +%Y-%m-%d)"
-          intended_warsaw_hour="$(TZ=Europe/Warsaw date -d "$utc_date $scheduled_hour:$scheduled_minute UTC" +%H)"
-          intended_warsaw_time="$(TZ=Europe/Warsaw date -d "$utc_date $scheduled_hour:$scheduled_minute UTC" '+%Y-%m-%d %H:%M:%S %Z')"
-
-          echo "Schedule expression: $trigger_schedule"
-          echo "Scheduled UTC trigger maps to Warsaw: $intended_warsaw_time"
-          if [[ "$intended_warsaw_hour" == "01" ]]; then
-            echo "Primary daily trigger selected."
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "Companion UTC trigger skipped."
+          echo "Unconfigured schedule trigger skipped."
           echo "should_run=false" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
         if: steps.gate.outputs.should_run == 'true'
         uses: actions/checkout@v4
+
+      - name: Read original scheduled run time
+        id: original_run
+        if: steps.gate.outputs.should_run == 'true' && github.event_name == 'schedule'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          created_at="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at)"
+          node -e 'if (!Number.isFinite(Date.parse(process.argv[1]))) throw new Error("Invalid original run time.");' "$created_at"
+          echo "created_at=$created_at" >> "$GITHUB_OUTPUT"
 
       - name: Resolve matrix options
         id: options
@@ -121,6 +117,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           TRIGGER_SCHEDULE: ${{ github.event.schedule }}
+          RUN_CREATED_AT: ${{ steps.original_run.outputs.created_at }}
           INPUT_LOCATIONS: ${{ inputs.locations }}
           INPUT_ROLLING_DAYS: ${{ inputs.rolling_days }}
           INPUT_DURATIONS: ${{ inputs.durations }}
@@ -147,7 +144,7 @@ jobs:
           catalog_locations="$(node -e "const { defaultLocationCities } = require('./src/rentcars/locations'); process.stdout.write(defaultLocationCities().join(','));")"
           locations="${INPUT_LOCATIONS:-$catalog_locations}"
           default_rolling_days="$SCHEDULE_ROLLING_DAYS"
-          if [[ "$EVENT_NAME" == "schedule" && "$TRIGGER_SCHEDULE" == "0 10 * * *" ]]; then
+          if [[ "$EVENT_NAME" == "schedule" && "$TRIGGER_SCHEDULE" == "17 10 * * *" ]]; then
             default_rolling_days="$SCHEDULE_DAYTIME_ROLLING_DAYS"
           fi
           rolling_days="${INPUT_ROLLING_DAYS:-$default_rolling_days}"
@@ -183,9 +180,25 @@ jobs:
           sort_count="$(node -e "process.stdout.write(String(process.argv[1].split(',').map(x => x.trim()).filter(Boolean).length || 1));" "$sort_orders")"
           expected_check_count=$((expected_scenario_count * airport_count * sort_count))
 
+          first_date="$(node -e '
+            const { primaryRunCycleDate } = require("./src/rentcars/watchdog");
+            const scheduled = process.env.EVENT_NAME === "schedule";
+            const time = scheduled ? Date.parse(process.env.RUN_CREATED_AT) : Date.now();
+            if (!Number.isFinite(time)) throw new Error("Missing original scheduled run creation time.");
+            if (scheduled && process.env.TRIGGER_SCHEDULE === "17 19 * * *") {
+              process.stdout.write(primaryRunCycleDate(time));
+            } else {
+              const localDate = new Intl.DateTimeFormat("en-CA", {
+                timeZone: "Europe/Warsaw", year: "numeric", month: "2-digit", day: "2-digit"
+              }).format(new Date(time));
+              const next = new Date(`${localDate}T12:00:00Z`);
+              next.setUTCDate(next.getUTCDate() + 1);
+              process.stdout.write(next.toISOString().slice(0, 10));
+            }
+          ')"
           dates=()
           for ((day_index=0; day_index<rolling_days_number; day_index++)); do
-            dates+=("$(TZ=Europe/Warsaw date -d "tomorrow +${day_index} days" +%F)")
+            dates+=("$(date -u -d "$first_date +${day_index} days" +%F)")
           done
 
           if [[ "$duration_count" -ge 11 ]]; then

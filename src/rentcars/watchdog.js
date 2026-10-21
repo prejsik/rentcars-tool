@@ -15,7 +15,18 @@ const MERGE_JOB_NAMES = new Set([
   "Merge and publish RentCars.pl report"
 ]);
 const DAYTIME_RUN_TITLE = "RentCars daytime run";
-const WARSAW_DATE = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Warsaw" });
+const WARSAW_TIME = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Warsaw", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+});
+
+function primaryRunCycleDate(time) {
+  const parts = Object.fromEntries(WARSAW_TIME.formatToParts(new Date(time)).map(({ type, value }) => [type, value]));
+  // The 19:17 collection belongs to the following morning, including across DST changes.
+  const nextDay = Number(parts.hour) * 60 + Number(parts.minute) >= 19 * 60 + 17;
+  return new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day) + Number(nextDay)))
+    .toISOString().slice(0, 10);
+}
 
 function timestamp(value) {
   const parsed = Date.parse(value);
@@ -330,7 +341,7 @@ function classifyDailyRuns(runs, options = {}) {
       const createdAt = timestamp(run?.created_at);
       return createdAt != null && now >= createdAt && (maxAgeMs
         ? now - createdAt <= maxAgeMs
-        : WARSAW_DATE.format(createdAt) === WARSAW_DATE.format(now));
+        : primaryRunCycleDate(createdAt) === primaryRunCycleDate(now));
     });
   const candidates = recentRuns
     .filter((run) => {
@@ -460,6 +471,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  primaryRunCycleDate,
   classifyDailyRuns,
   decideCompletedRunRecovery,
   enrichRunJobEvidence,

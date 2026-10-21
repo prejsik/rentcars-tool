@@ -310,15 +310,15 @@ test("daily schedule retains 60 rolling dates and durations 2 through 14", () =>
   assert.equal(inputs.durations.default, "2,3,4,5,6,7,8,9,10,11,12,13,14");
 });
 
-test("10:00 Warsaw schedule adds 20 dates without changing the night profile or Telegram secrets", () => {
+test("19:17 and 10:17 Warsaw schedules retain separate date horizons, reports and Telegram secrets", () => {
   const daily = workflow(".github/workflows/rentcars-daily.yml");
   assert.deepEqual(daily.on.schedule, [
-    { cron: "17 23 * * *" }, { cron: "17 0 * * *" },
-    { cron: "0 10 * * *", timezone: "Europe/Warsaw" }
+    { cron: "17 19 * * *", timezone: "Europe/Warsaw" },
+    { cron: "17 10 * * *", timezone: "Europe/Warsaw" }
   ]);
   assert.equal(daily.env.SCHEDULE_DAYTIME_ROLLING_DAYS, "20");
-  assert.equal(daily.env.REPORT_PROFILE, "${{ github.event_name == 'schedule' && github.event.schedule == '0 10 * * *' && 'afternoon' || 'morning' }}");
-  assert.equal(daily["run-name"], "${{ github.event_name == 'schedule' && github.event.schedule == '0 10 * * *' && 'RentCars daytime run' || inputs.watchdog_recovery == 'true' && 'RentCars watchdog recovery' || 'RentCars daily run' }}");
+  assert.equal(daily.env.REPORT_PROFILE, "${{ github.event_name == 'schedule' && github.event.schedule == '17 10 * * *' && 'afternoon' || 'morning' }}");
+  assert.equal(daily["run-name"], "${{ github.event_name == 'schedule' && github.event.schedule == '17 10 * * *' && 'RentCars daytime run' || inputs.watchdog_recovery == 'true' && 'RentCars watchdog recovery' || 'RentCars daily run' }}");
   const send = daily.jobs.notify.steps.find(step => step.name === "Send Telegram notification");
   assert.equal(send.env.TELEGRAM_BOT_TOKEN, "${{ secrets.TELEGRAM_BOT_TOKEN }}");
   assert.equal(send.env.TELEGRAM_CHAT_ID, "${{ secrets.TELEGRAM_CHAT_ID }}");
@@ -330,12 +330,16 @@ test("schedule gate and matrix retain day, night, retry and manual date ranges",
   const options = daily.jobs.plan.steps.find(step => step.id === "options");
   assert.equal(options.env.EVENT_NAME, "${{ github.event_name }}");
   assert.equal(options.env.TRIGGER_SCHEDULE, "${{ github.event.schedule }}");
+  assert.equal(options.env.RUN_CREATED_AT, "${{ steps.original_run.outputs.created_at }}");
+  const original = daily.jobs.plan.steps.find(step => step.id === "original_run");
+  assert.equal(original.if, "steps.gate.outputs.should_run == 'true' && github.event_name == 'schedule'");
+  assert.match(original.run, /actions\/runs\/\$\{GITHUB_RUN_ID\}/);
   const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
   const cases = [
-    ["schedule", "0 10 * * *", "2026-07-15", true, 20, ""],
-    ["schedule", "0 10 * * *", "2026-12-15", true, 20, ""],
-    ["schedule", "17 23 * * *", "2026-07-15", true, 60, ""],
-    ["schedule", "17 0 * * *", "2026-12-15", true, 60, ""],
+    ["schedule", "17 10 * * *", "2026-07-15", true, 20, ""],
+    ["schedule", "17 10 * * *", "2026-12-15", true, 20, ""],
+    ["schedule", "17 19 * * *", "2026-07-15", true, 60, ""],
+    ["schedule", "17 19 * * *", "2026-12-15", true, 60, ""],
     ["schedule", "17 0 * * *", "2026-07-15", false, 0, ""],
     ["schedule", "17 23 * * *", "2026-12-15", false, 0, ""],
     ["workflow_dispatch", "", "2026-07-15", true, 7, "7"]
@@ -349,14 +353,10 @@ test("schedule gate and matrix retain day, night, retry and manual date ranges",
         .replaceAll("${{ steps.gate.outputs.should_run }}", String(shouldRun));
       const env = { ...process.env, ...daily.env, GITHUB_OUTPUT: output, GITHUB_RUN_ATTEMPT: "2",
         EVENT_NAME: event, TRIGGER_SCHEDULE: cron, INPUT_ROLLING_DAYS: inputDays,
+        RUN_CREATED_AT: `${date}T17:17:00Z`,
         INPUT_LOCATIONS: "", INPUT_DURATIONS: "", INPUT_SPEED_MODE: "",
         INPUT_SORT_ORDERS: "", INPUT_LOCATION_CONCURRENCY: "" };
-      const [minute = "0", hour = "0"] = cron ? cron.split(" ") : [];
-      const mappedHour = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Warsaw", hour: "2-digit", hourCycle: "h23" })
-        .format(new Date(`${date}T${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:00Z`));
-      // Git Bash on Windows does not ship the Linux IANA timezone database.
-      const gateResult = spawnSync(bash, ["-eo", "pipefail", "-c",
-        `date() { if [[ "$*" == '-u +%Y-%m-%d' ]]; then echo '${date}'; elif [[ "$1" == '-d' && "$3" == '+%H' ]]; then echo '${mappedHour}'; else command date "$@"; fi; };\n${interpolate(gate.run)}`],
+      const gateResult = spawnSync(bash, ["-eo", "pipefail", "-c", interpolate(gate.run)],
         { cwd: ROOT, env, encoding: "utf8" });
       assert.equal(gateResult.status, 0, gateResult.stderr);
       assert.match(fs.readFileSync(output, "utf8"), new RegExp(`should_run=${shouldRun}`), `${date}: ${event} ${cron}`);
@@ -373,6 +373,11 @@ test("schedule gate and matrix retain day, night, retry and manual date ranges",
       if (shouldRun) {
         assert.ok(values.locations.split(",").includes("Szczecin"));
         assert.equal(values.start_dates.split(",").length, expectedDays);
+        if (event === "schedule") {
+          const firstDate = new Date(`${date}T12:00:00Z`);
+          firstDate.setUTCDate(firstDate.getUTCDate() + 1);
+          assert.equal(values.start_dates.split(",")[0], firstDate.toISOString().slice(0, 10));
+        }
         assert.equal(JSON.parse(values.matrix).include.length, Math.ceil(expectedDays / 3));
       }
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }

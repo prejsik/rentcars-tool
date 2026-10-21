@@ -64,6 +64,15 @@ function scheduledDecision(runs) {
   });
 }
 
+test("morning watchdog checks the previous evening cycle and rejects older collections", () => {
+  const evening = trustedRun({ created_at: "2026-10-20T17:17:00Z", conclusion: "success", has_scrape_jobs: true });
+  const options = { ...trustOptions, now: "2026-10-21T04:30:00Z" };
+  assert.deepEqual(classifyDailyRuns([evening], options), { action: "none", runId: 801, runAttempt: 1 });
+  assert.equal(classifyDailyRuns([{ ...evening, conclusion: "failure" }], options).action, "rerun");
+  assert.equal(classifyDailyRuns([{ ...evening, created_at: "2026-10-19T17:17:00Z" }], options).action, "missing");
+  assert.equal(classifyDailyRuns([evening], { ...options, now: "2026-10-21T17:17:00Z" }).action, "missing");
+});
+
 test("reporting-only failure is reported without rerunning completed core work", async () => {
   const notificationFailure = await enrich(trustedRun(), dailyJobs({ notify: "failure" }));
 
@@ -456,7 +465,7 @@ test("workflow inspection uses a supported date filter instead of relying on an 
         cwd: ROOT, encoding: "utf8", env: { ...process.env, ...workflowRunEnv,
           BASH_ENV: fixturePath.replaceAll("\\", "/"), GITHUB_OUTPUT: outputPath.replaceAll("\\", "/"),
           GITHUB_TOKEN: "test-token", GITHUB_REPOSITORY: "mmcars/rentcars", GITHUB_RUN_ID: "901", GITHUB_RUN_ATTEMPT: "1",
-          DEFAULT_BRANCH: "main", WATCHDOG_MODE: "schedule", WATCHDOG_NOW: "2026-09-27T18:00:00Z",
+          DEFAULT_BRANCH: "main", WATCHDOG_MODE: "schedule", WATCHDOG_NOW: "2026-09-27T16:00:00Z",
           CACHED_RUNS: JSON.stringify({ workflow_runs: [old], total_count: 1 }),
           FRESH_RUNS: JSON.stringify(payload) }
       });

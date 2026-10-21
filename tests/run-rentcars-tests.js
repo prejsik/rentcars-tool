@@ -1189,7 +1189,7 @@ runAsyncTest("watchdog inspects all runs but blocks recovery when newer job evid
     }
   ], {
     token: "test-token",
-    fetchImpl: async (url) => url.includes("601")
+    fetchImpl: async (url) => new URL(url).pathname === "/runs/601/jobs"
       ? { ok: false, status: 500 }
       : {
         ok: true,

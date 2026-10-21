@@ -106,7 +106,7 @@ test("no morning run today never reports a daytime, old or manual run as today's
     run(78, { event: "workflow_dispatch" }),
     run(77, { created_at: "2026-09-25T23:20:00Z" })
   ] });
-  assert.match(await helper().collectMorningMessage({ ...options, ...api }), /Brak dzisiejszego/);
+  assert.match(await helper().collectMorningMessage({ ...options, ...api }), /Brak uruchomienia dla cyklu/);
   assert.equal(api.calls.length, 1);
 });
 
@@ -124,6 +124,20 @@ test("successful skipped schedule companion does not hide primary work", async (
 test("Warsaw dates follow summer and winter time", () => {
   assert.equal(helper().warsawDate(Date.parse("2026-09-26T22:30:00Z")), "2026-09-27");
   assert.equal(helper().warsawDate(Date.parse("2026-12-26T23:30:00Z")), "2026-12-27");
+});
+
+test("07:00 status recognizes the previous 19:17 collection across summer, winter and DST transitions", async () => {
+  for (const [created_at, morning] of [
+    ["2026-09-26T17:17:00Z", "2026-09-27T05:00:00Z"],
+    ["2026-12-26T18:17:00Z", "2026-12-27T06:00:00Z"],
+    ["2026-03-28T18:17:00Z", "2026-03-29T05:00:00Z"],
+    ["2026-10-24T17:17:00Z", "2026-10-25T06:00:00Z"]
+  ]) {
+    const api = mockApi({ runs: [run(77, { created_at })], jobs: [job(1, "in_progress", 3)] });
+    const message = await helper().collectMorningMessage({ ...options, ...api, now: Date.parse(morning) });
+    assert.match(message, /actions\/runs\/77/, morning);
+    assert.doesNotMatch(message, /Brak uruchomienia/);
+  }
 });
 
 test("queued workflow can have active jobs and a credible ETA", async () => {

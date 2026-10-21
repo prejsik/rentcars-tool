@@ -184,7 +184,7 @@ jobs:
               fi
               ;;
             missing)
-              message="RentCars.pl watchdog: no primary morning run could be verified for today. This may be missing or stale GitHub API data. No replacement was started; manual inspection is required."
+              message="RentCars.pl watchdog: no primary run could be verified for the current report cycle (scheduled at 19:17 Warsaw time the previous evening). This may be missing or stale GitHub API data. No replacement was started; manual inspection is required."
               api_failed=true
               ;;
             monitor)

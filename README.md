@@ -94,7 +94,7 @@ For every completion event, the watchdog reads the exact run directly before ins
 
 Report generation, Pages publication, and Telegram notification are separate jobs. After saving and uploading the report, a completeness gate fails the merge job for partial or erroneous results. The preserved partial report can still be published and sent with its actual status; missing reports cannot be published. The notification does not need a repository checkout or approval of the Pages environment. It waits for publication only for a bounded period and includes an HTML link only when the public metadata matches the current run and attempt and the public HTML is byte-for-byte identical to the HTML in that run's downloaded artifact. Otherwise it sends the available artifact link and workflow link without presenting an older HTML report as current. A later Pages publication does not send a second completion message.
 
-The separate `rentcars-morning.yml` workflow schedules a morning Telegram status at **07:00 Europe/Warsaw**, with daylight-saving time handled by the schedule timezone. GitHub may delay the trigger; the message includes the actual inspection time. It inspects only today's trusted daily/recovery run and its current attempt, without starting collection or publishing anything. Existing completion notifications remain enabled.
+The separate `rentcars-morning.yml` workflow schedules a morning Telegram status at **07:00 Europe/Warsaw**, with daylight-saving time handled by the schedule timezone. GitHub may delay the trigger; the message includes the actual inspection time. It inspects the current report cycle's trusted daily/recovery run and its current attempt, including collection started at 19:17 the previous evening, without starting collection or publishing anything. Existing completion notifications remain enabled.
 
 Morning progress counts completed, running, queued, and failed chunks, not individual offers or scenarios inside running chunks. ETA is a range for the remaining collection work, based on at least two successful chunks in the current attempt and the six-worker limit. It excludes unpredictable runner delays, retries, and final publication. Failed, overdue, queued-only, or insufficiently sampled work gets an explicit unknown ETA. Current verified complete or partial reports include their HTML link and check counts; older reports are not passed off as today's results. API/checkout failures produce a diagnostic message instead. Manual runs preview the message by default; sending requires selecting `send_notification`.
 
@@ -112,8 +112,10 @@ During long scheduled runs, every date chunk writes JSON snapshots after each co
 
 The scheduled GitHub profiles share all settings except the pickup-date horizon:
 
-- `01:17 Europe/Warsaw`: 60 rolling pickup dates from tomorrow (unchanged)
-- `10:00 Europe/Warsaw`: 20 rolling pickup dates from tomorrow, using a timezone-aware schedule
+- `19:17 Europe/Warsaw`: 60 rolling pickup dates from tomorrow
+- `10:17 Europe/Warsaw`: 20 rolling pickup dates from tomorrow
+
+Both schedules follow Warsaw local time automatically in summer and winter. The primary report cycle starts at 19:17 and belongs to the following morning; the 07:00 status and morning watchdog checkpoints use the same cycle. Scheduled attempts use the original run creation time to keep the same pickup dates when retrying after midnight.
 - all locations from `src/rentcars/locations.json`
 - `durations: 2,3,4,5,6,7,8,9,10,11,12,13,14`
 - `sort_orders: price_insurance`
@@ -126,13 +128,13 @@ The scheduled GitHub profiles share all settings except the pickup-date horizon:
 Manual GitHub runs can override locations, rolling days, durations, and speed mode from the `workflow_dispatch` form.
 Telegram notifications use the repository `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets.
 Both scheduled runs use the same Telegram secrets but publish separate reports:
-- Morning (01:17, 60 dates): https://prejsik.github.io/rentcars-tool/morning/report.html
-- Afternoon (10:00, 20 dates): https://prejsik.github.io/rentcars-tool/afternoon/report.html
+- Morning report (19:17 the previous evening, 60 dates): https://prejsik.github.io/rentcars-tool/morning/report.html
+- Afternoon report (10:17, 20 dates): https://prejsik.github.io/rentcars-tool/afternoon/report.html
 
 Each deployment preserves the other profile and compares freshness only within its own profile. Telegram links to the matching report after verifying its run and attempt. The site index links to both reports; the legacy `/report.html` remains an alias for the most recent report. A new profile becomes available after its first successful publication. If the other report cannot be read and verified, deployment is blocked rather than deleting it.
 
-The 10:00 profile has 260 date/duration scenarios, 2340 airport checks, and seven chunks. GitHub may delay scheduled starts. Rerunning a scheduled attempt retains its original schedule profile; manual runs keep the 60-day default unless overridden and publish in the morning slot.
-The 10:00 run is named `RentCars daytime run`. Completion-triggered recovery treats the daytime and night profiles separately, so a shorter report cannot replace recovery of the 60-day collection. Existing morning watchdog checkpoints check only the night profile; they do not detect a missing daytime trigger.
+The 10:17 profile has 260 date/duration scenarios, 2600 airport checks, and seven chunks. GitHub may delay scheduled starts. Rerunning a scheduled attempt retains its original schedule profile; manual runs keep the 60-day default unless overridden and publish in the morning slot.
+The 10:17 run is named `RentCars daytime run`. Completion-triggered recovery treats the daytime and night profiles separately, so a shorter report cannot replace recovery of the 60-day collection. Existing morning watchdog checkpoints check only the night profile; they do not detect a missing daytime trigger.
 
 Watchdog run discovery uses GitHub's supported `created` date filter and validates the returned window and completeness. Inspection keys and no-cache headers are additional safeguards, not proof of fresh data. Scheduled checks recognize today's morning run by its Warsaw calendar date, even if a checkpoint is delayed beyond twelve hours. Invalid or incomplete API evidence blocks recovery and produces an inspection alert. A completed replacement suppresses further retries and exhausted-attempt alerts for the older run.
 
