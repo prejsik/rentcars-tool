@@ -25,18 +25,30 @@ function newer(a, b) {
 }
 
 async function buildSite({ profile, metadata, html, baseUrl, pagesExists = true,
-  resolveLegacyProfile, replaceRunId = "", fetchImpl = globalThis.fetch }) {
+  resolveLegacyProfile, replaceRunId = "", fetchImpl = globalThis.fetch,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   if (!PROFILES.includes(profile) || metadata.report_profile !== profile) throw new Error("Invalid report profile.");
   validate(metadata, html);
   const prefix = baseUrl.replace(/\/$/, "") + "/";
   if (new URL(prefix).protocol !== "https:") throw new Error("Pages URL must use HTTPS.");
   const read = async (name) => {
-    const response = await fetchImpl(`${prefix}${name}?publication=${metadata.run_id}-${metadata.run_attempt}-${Date.now()}`, {
-      signal: AbortSignal.timeout(20000), cache: "no-store"
-    });
-    if (response.status === 404) return null;
-    if (response.status !== 200) throw new Error(`Cannot preserve ${name}: HTTP ${response.status}.`);
-    return response.text();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let response;
+      let error;
+      try {
+        response = await fetchImpl(`${prefix}${name}?publication=${metadata.run_id}-${metadata.run_attempt}-${Date.now()}-${attempt}`, {
+          signal: AbortSignal.timeout(20000), cache: "no-store"
+        });
+        if (response.status === 200) return await response.text();
+      } catch (failure) { error = failure; }
+      if (response?.status === 404) return null;
+      const retryable = error || response.status === 408 || response.status === 429
+        || (response.status >= 500 && response.status <= 599);
+      if (!retryable || attempt === 2) {
+        throw new Error(`Cannot preserve ${name}: ${error ? error.message : `HTTP ${response.status}.`}`);
+      }
+      await sleep((attempt + 1) * 1000);
+    }
   };
   const rootText = await read("report-meta.json");
   const rootHtml = await read("report.html");

@@ -15,6 +15,7 @@ const candidate = (profile, day, id = day) => ({
 function options(files = {}, overrides = {}) {
   return {
     baseUrl: "https://reports.example/rentcars/", pagesExists: false,
+    sleep: async () => {},
     resolveLegacyProfile: async () => "morning",
     fetchImpl: async (url, init) => {
       assert.equal(init.headers, undefined, "public Pages requests must not contain credentials");
@@ -39,6 +40,47 @@ test("freshness is per profile; older afternoon cannot replace afternoon but can
   assert.equal(afternoon.files["report.html"], morning.files["report.html"]);
   const stale = await buildSite({ ...options(afternoon.files), ...candidate("afternoon", "27") });
   assert.equal(stale.publish, false);
+});
+
+test("transient Pages errors retry without losing the other report slot", async () => {
+  const first = await buildSite({ ...options(), ...candidate("morning", "27") });
+  const saved = await buildSite({ ...options(first.files), ...candidate("afternoon", "28") });
+  for (const failure of [503, 429, "network"]) {
+    const stableFetch = options(saved.files).fetchImpl;
+    const urls = [];
+    const delays = [];
+    const result = await buildSite({ ...options(saved.files), ...candidate("morning", "29"),
+      sleep: async (ms) => delays.push(ms),
+      fetchImpl: async (url, init) => {
+        if (new URL(url).pathname.endsWith("afternoon/report-meta.json")) {
+          urls.push(url);
+          if (urls.length < 3) {
+            if (failure === "network") throw new Error("Connection reset");
+            return { status: failure };
+          }
+        }
+        return stableFetch(url, init);
+      }
+    });
+    assert.equal(result.publish, true);
+    assert.equal(result.files["afternoon/report.html"], saved.files["afternoon/report.html"]);
+    assert.equal(result.files["afternoon/report-meta.json"], saved.files["afternoon/report-meta.json"]);
+    assert.equal(new Set(urls).size, 3);
+    assert.deepEqual(delays, [1000, 2000]);
+  }
+});
+
+test("unavailable Pages reports fail closed after three attempts; permanent errors are not retried", async () => {
+  for (const [status, expectedCalls] of [[503, 3], [403, 1]]) {
+    let calls = 0;
+    const delays = [];
+    await assert.rejects(buildSite({ ...options(), ...candidate("morning", "28"),
+      sleep: async (ms) => delays.push(ms),
+      fetchImpl: async () => { calls++; return { status }; }
+    }), new RegExp(`HTTP ${status}`));
+    assert.equal(calls, expectedCalls);
+    assert.equal(delays.length, expectedCalls - 1);
+  }
 });
 test("existing root report migrates into its own profile without relabeling it", async () => {
   const legacy = candidate("morning", "27");
